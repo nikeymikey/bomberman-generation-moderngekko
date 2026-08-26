@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Bomberman Generation -- ModernGekko recomp
+#
+# Nothing derived from the game disc may be committed: the ISO, anything
+# extracted from it, the C DolRecomp generates from it, and the compiled
+# module. Verified by scripts/Verify-Gitignore.ps1.
+# ---------------------------------------------------------------------------
+
+# ---- Disc images ----
+*.iso
+*.gcm
+*.ciso
+*.rvz
+*.wbfs
+*.nkit.iso
+/iso/
+
+# ---- Extracted game data ----
+/extracted/
+*.dol
+*.rel
+*.tpl
+*.seb
+*.mdt
+*.adp
+*.cod
+*.tnb
+*.sqb
+*.bnr
+*.h4m
+*.tgc
+
+# ---- Generated C from DolRecomp ----
+/generated/
+generated.c
+generated.h
+generated_smc.txt
+chunk_*.c
+
+# ---- Compiled modules ----
+*.mgm
+*.dll
+*.so
+*.dylib
+
+# ---- Build output (including the submodules' own build dirs) ----
+build/
+build*/
+out/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.exe
+*.lib
+*.a
+
+# ---- Tool downloads ----
+/extern/
+
+# ---- Saves, runtime state, logs ----
+/saves/
+*.gci
+*.sav
+*.log
+# Run-Game.ps1's temporary stdout/stderr files. `*.log` does NOT match
+# `foo.log.out` / `foo.log.err`, and two of them reached a commit before this
+# rule existed.
+*.log.out
+*.log.err
+*.out.log
+shader_cache/
+moderngekko-user/
+
+# ---- Editor / OS noise ----
+.vs/
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
+
+# ---- Deliberately NO negation (!) rules --------------------------------------
+# On the gcrecomp project an "!/src/**" rule silently overrode "*.pdb" and
+# would have committed a .pdb. Keeping this file negation-free also makes
+# `git check-ignore` unambiguous, since a matching negation pattern makes
+# check-ignore exit 0 for a file that is in fact tracked.
