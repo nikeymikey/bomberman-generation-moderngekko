@@ -18,43 +18,6 @@ below and both worth reporting to ExpansionPak:
 2. The vendored GXRuntime `CPUState` is one ABI revision behind ModernGekko's,
    so no generated module can load. See `patches/`.
 
-## Why this toolkit rather than gcrecomp
-
-The first attempt used [gcrecomp](https://github.com/sp00nznet/gcrecomp). It got
-a long way — 5528 functions recompiled, clean MSVC build, booted through
-runtime/DVD/D3D11/audio/input init and into PowerPC code — then stopped dead
-issuing a DVD read. Findings from that attempt, all verified in source:
-
-* `hw_write32_hle` has **no handler for the DVD DMA registers** (`DICR`,
-  `DIMAR`, `DILENGTH`, `DICMDBUF`). The disc read is acknowledged but never
-  performed, so the disc header never arrives in RAM.
-* EXI DMA clears TSTART so `__OSInitSram` "succeeds", but transfers no data —
-  the game gets 64 zero bytes of SRAM.
-* The **OS HLE layer is wired to nothing**: `register_os_functions()` only
-  increments a counter, and `lookup_os_func()` has zero callers anywhere in the
-  repository. A symbol map would not have helped; the binding step it was meant
-  to feed does not exist.
-* gcrecomp's own status table marks *vertex format handling*, *draw call
-  pipeline* and *TEV shader compilation* as **In Progress**, and its audio
-  backend as a **stub**.
-
-The blocking DVD fix was ~30 lines, but the road behind it meant finishing
-someone else's emulator. ModernGekko *is* Dolphin's emulator — `disc_interface`,
-`mmio_bus`, `gx_pipeline`, `gx_texture_decoder` all inherited working.
-
-Measured on this exact DOL, DolRecomp decoded **every byte of both text
-sections with 0 unknown opcodes** (text0: 2368 instructions, 725 code + 1643
-embedded data; text1: 425,304 instructions, 425,296 code + 8 data). It sweeps
-linearly and classifies data, rather than guessing function boundaries by
-heuristic as gcrecomp does.
-
-DolRecomp also warns that this DOL **may patch executable memory at runtime**,
-listing 104 sites in `generated_smc.txt`. Inspected: mostly `stw` (a
-conservative "this store might target code" heuristic) plus a few `icbi` in the
-boot stub consistent with a normal post-apploader cache flush. Not evidence of
-self-modifying code — but worth re-checking if execution ever goes somewhere
-impossible.
-
 ## Facts about this game (carried over, independently verified)
 
 | Value | Source |
