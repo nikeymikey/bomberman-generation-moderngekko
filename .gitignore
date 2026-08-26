@@ -93,3 +93,8 @@ desktop.ini
 # would have committed a .pdb. Keeping this file negation-free also makes
 # `git check-ignore` unambiguous, since a matching negation pattern makes
 # check-ignore exit 0 for a file that is in fact tracked.
+
+# Editor / tooling backups
+*.bak
+*.orig
+*.rej
