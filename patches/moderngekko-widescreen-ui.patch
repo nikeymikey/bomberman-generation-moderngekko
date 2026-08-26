@@ -1,0 +1,99 @@
+diff --git a/include/moderngekko/runtime.hpp b/include/moderngekko/runtime.hpp
+index 0adc855..7798d4d 100644
+--- a/include/moderngekko/runtime.hpp
++++ b/include/moderngekko/runtime.hpp
+@@ -32,6 +32,9 @@ struct GraphicsSettings
+ {
+   std::string backend;
+   std::optional<int> internal_resolution_scale;
++  // Force 16:9 output with Dolphin's projection hack. Both halves are needed:
++  // see the note where this is consumed in dolphin_runtime.cpp.
++  bool widescreen = false;
+ };
+ 
+ struct AudioSettings
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 051143f..145d16e 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -681,8 +681,11 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   // Opt-in via the MODERNGEKKO_WIDESCREEN environment variable, matching the
+   // MODERNGEKKO_STATICRECOMP convention already used in this file. Unset,
+   // empty, or "0" leaves Dolphin's defaults untouched.
+-  if (const char *widescreen = std::getenv("MODERNGEKKO_WIDESCREEN");
+-      widescreen && *widescreen && *widescreen != '0') {
++  const char *widescreen_env = std::getenv("MODERNGEKKO_WIDESCREEN");
++  const bool widescreen_requested =
++      impl->config.graphics.widescreen ||
++      (widescreen_env && *widescreen_env && *widescreen_env != '0');
++  if (widescreen_requested) {
+     Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
+     Config::SetBase(Config::GFX_WIDESCREEN_HACK, true);
+   }
+diff --git a/tools/frontend_config.cpp b/tools/frontend_config.cpp
+index 03740d4..1b1e308 100644
+--- a/tools/frontend_config.cpp
++++ b/tools/frontend_config.cpp
+@@ -140,6 +140,9 @@ ConfigResult LoadConfig(const fs::path &user_directory,
+     } else if (key == "fullscreen") {
+       if (!ParseBoolean(value, &config.fullscreen))
+         return {.error = "fullscreen must be true or false"};
++    } else if (key == "widescreen") {
++      if (!ParseBoolean(value, &config.widescreen))
++        return {.error = "widescreen must be true or false"};
+     } else if (key == "nickname")
+       config.netplay_nickname = raw_value;
+     else if (key == "address")
+@@ -255,6 +258,7 @@ bool SaveConfig(const fs::path &user_directory, const ConfigResult &config,
+        << config.resolution << '\n'
+        << "backend=" << graphics_backend << '\n'
+        << "fullscreen=" << (config.fullscreen ? "true" : "false") << '\n'
++       << "widescreen=" << (config.widescreen ? "true" : "false") << '\n'
+        << "show_fps_in_title=" << (config.show_fps_in_title ? "true" : "false")
+        << '\n'
+        << "[Input]\n";
+diff --git a/tools/frontend_config.hpp b/tools/frontend_config.hpp
+index 3b18d05..b9b1f02 100644
+--- a/tools/frontend_config.hpp
++++ b/tools/frontend_config.hpp
+@@ -26,6 +26,7 @@ struct ConfigResult {
+   std::vector<std::string> controllers;
+   bool show_fps_in_title = true;
+   bool fullscreen = false;
++  bool widescreen = false;
+   std::string netplay_nickname = "Player";
+   std::string netplay_address = "127.0.0.1";
+   std::uint16_t netplay_port = 2626;
+diff --git a/tools/moderngekko_launcher.cpp b/tools/moderngekko_launcher.cpp
+index 7699c3d..1cd07c4 100644
+--- a/tools/moderngekko_launcher.cpp
++++ b/tools/moderngekko_launcher.cpp
+@@ -964,6 +964,16 @@ int main(int argc, char** argv)
+       }
+       ImGui::EndCombo();
+     }
++    if (ImGui::Checkbox("Widescreen (16:9)", &config.widescreen))
++    {
++      std::string error;
++      if (!moderngekko::frontend::SaveConfig(user_directory, config, &error))
++      {
++        config.widescreen = !config.widescreen;
++        std::lock_guard lock(dialog.mutex);
++        dialog.error = std::move(error);
++      }
++    }
+     const bool previous_show_fps_in_title = show_fps_in_title;
+     if (ImGui::Checkbox("Show FPS in window title", &show_fps_in_title))
+     {
+diff --git a/tools/moderngekko_run.cpp b/tools/moderngekko_run.cpp
+index d6b3569..c9a20a5 100644
+--- a/tools/moderngekko_run.cpp
++++ b/tools/moderngekko_run.cpp
+@@ -249,6 +249,7 @@ int RunMain(int argc, char **argv) {
+   if (config.graphics.backend.empty())
+     config.graphics.backend = frontend_config.graphics_backend;
+   config.fullscreen = frontend_config.fullscreen;
++  config.graphics.widescreen = frontend_config.widescreen;
+   config.show_fps_in_title = frontend_config.show_fps_in_title;
+   if (use_default_mods) {
+     config.mod_directories.push_back(executable_directory / "Mods");

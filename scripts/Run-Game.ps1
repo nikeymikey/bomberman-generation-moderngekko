@@ -30,7 +30,10 @@ param(
     [string[]] $RunnerArgs = @(),
 
     [Parameter(HelpMessage = 'Seconds before the process is killed. 0 = wait forever.')]
-    [int] $TimeoutSeconds = 120
+    [int] $TimeoutSeconds = 120,
+
+    [Parameter(HelpMessage = 'Force 16:9 output with the projection hack. Requires the moderngekko-widescreen patch and a rebuilt runtime.')]
+    [switch] $Widescreen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +60,14 @@ if ($RunnerArgs.Count -gt 0) { $argList += '--'; $argList += $RunnerArgs }
 $quoted = ($argList | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' '
 Write-Host ("Launching: {0} {1}" -f $portExe.FullName, $quoted) -ForegroundColor DarkGray
 
+# Start-Process inherits this process's environment, so setting it here reaches
+# the runner. Saved and restored so it does not leak into the caller's session.
+$previousWidescreen = $env:MODERNGEKKO_WIDESCREEN
+if ($Widescreen) {
+    $env:MODERNGEKKO_WIDESCREEN = '1'
+    Write-Host 'Widescreen: MODERNGEKKO_WIDESCREEN=1 (needs the widescreen patch + rebuilt runtime)' -ForegroundColor Cyan
+}
+
 $proc = Start-Process -FilePath $portExe.FullName -ArgumentList $quoted `
     -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
 # Touch .Handle so .NET caches a handle; without it ExitCode is $null after exit.
@@ -72,6 +83,8 @@ if ($TimeoutSeconds -gt 0) {
         $proc.WaitForExit(5000) | Out-Null
     }
 } else { $proc.WaitForExit() }
+
+$env:MODERNGEKKO_WIDESCREEN = $previousWidescreen
 
 $exitCode = $null
 try { if ($haveHandle) { $exitCode = $proc.ExitCode } } catch { }

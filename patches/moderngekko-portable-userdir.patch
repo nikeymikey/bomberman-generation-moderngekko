@@ -1,0 +1,76 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fa2503d..0425823 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -58,6 +58,8 @@ set(MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID "" CACHE STRING
+     "Source disc ID accepted by the optional disc preparer")
+ option(MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS
+        "Place the branded user directory in Documents" OFF)
++option(MODERNGEKKO_PORTABLE_USER_DIRECTORY
++       "Keep the user directory beside the executable (portable build)" OFF)
+ set(MODERNGEKKO_FRONTEND_SDK "" CACHE PATH
+     "Optional non-root sysroot containing X11 and audio development packages")
+ 
+@@ -462,6 +464,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         target_compile_definitions(moderngekko-run PRIVATE
+             MODERNGEKKO_REQUIRED_DISC_ID="${MODERNGEKKO_REQUIRED_DISC_ID}")
+     endif()
++    if(MODERNGEKKO_PORTABLE_USER_DIRECTORY)
++        target_compile_definitions(moderngekko-run PRIVATE
++            MODERNGEKKO_PORTABLE_USER_DIRECTORY=1)
++    endif()
+     if(MODERNGEKKO_REQUIRED_DOL_SHA256)
+         target_compile_definitions(moderngekko-run PRIVATE
+             MODERNGEKKO_REQUIRED_DOL_SHA256="${MODERNGEKKO_REQUIRED_DOL_SHA256}")
+@@ -550,6 +556,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+         target_compile_definitions(moderngekko-launcher PRIVATE
+             MODERNGEKKO_REQUIRED_DISC_ID="${MODERNGEKKO_REQUIRED_DISC_ID}")
+     endif()
++    if(MODERNGEKKO_PORTABLE_USER_DIRECTORY)
++        target_compile_definitions(moderngekko-launcher PRIVATE
++            MODERNGEKKO_PORTABLE_USER_DIRECTORY=1)
++    endif()
+     if(MODERNGEKKO_REQUIRED_DOL_SHA256)
+         target_compile_definitions(moderngekko-launcher PRIVATE
+             MODERNGEKKO_REQUIRED_DOL_SHA256="${MODERNGEKKO_REQUIRED_DOL_SHA256}")
+diff --git a/tools/moderngekko_launcher.cpp b/tools/moderngekko_launcher.cpp
+index 1cd07c4..75453b8 100644
+--- a/tools/moderngekko_launcher.cpp
++++ b/tools/moderngekko_launcher.cpp
+@@ -514,8 +514,12 @@ int main(int argc, char** argv)
+       extract_only = argv[++i];
+   }
+ 
+-  const fs::path user_directory = DefaultUserDirectory();
+   const fs::path release_directory = ExecutableDirectory(argv[0]);
++#ifdef MODERNGEKKO_PORTABLE_USER_DIRECTORY
++  const fs::path user_directory = release_directory / "User";
++#else
++  const fs::path user_directory = DefaultUserDirectory();
++#endif
+   if (extract_only)
+   {
+     ExtractionState extraction;
+diff --git a/tools/moderngekko_run.cpp b/tools/moderngekko_run.cpp
+index c9a20a5..c494eef 100644
+--- a/tools/moderngekko_run.cpp
++++ b/tools/moderngekko_run.cpp
+@@ -134,9 +134,17 @@ int RunMain(int argc, char **argv) {
+   setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1", 0);
+ #endif
+   moderngekko::RuntimeConfig config;
+-  config.user_directory = DefaultUserDirectory();
+   const std::filesystem::path executable_directory =
+       ExecutableDirectory(argv[0]);
++#ifdef MODERNGEKKO_PORTABLE_USER_DIRECTORY
++  // Portable build: keep config, saves and logs beside the executable instead
++  // of in %LOCALAPPDATA% (or Documents, with USER_DIRECTORY_IN_DOCUMENTS), so
++  // the whole thing can be copied or zipped as one folder. Mods are already
++  // read from <exe dir>/Mods, so this makes the layout consistent.
++  config.user_directory = executable_directory / "User";
++#else
++  config.user_directory = DefaultUserDirectory();
++#endif
+ #ifdef MODERNGEKKO_DEFAULT_WINDOW_TITLE
+   config.window_title = MODERNGEKKO_DEFAULT_WINDOW_TITLE;
+ #endif

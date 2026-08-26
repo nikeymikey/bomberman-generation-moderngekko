@@ -1,0 +1,28 @@
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index f9b5405..051143f 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -669,6 +669,23 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
+                   ShaderCompilationMode::AsynchronousUberShaders);
+   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, true);
++
++  // Widescreen. ModernGekko sets neither of these, so Dolphin falls back to
++  // AspectMode::Auto with the hack disabled, and a 4:3 game stays 4:3.
++  //
++  // BOTH are required. GFX_ASPECT_RATIO=ForceWide only changes the output
++  // aspect, which stretches a 4:3 image horizontally. GFX_WIDESCREEN_HACK
++  // widens the projection so the extra width shows more of the scene rather
++  // than distortion.
++  //
++  // Opt-in via the MODERNGEKKO_WIDESCREEN environment variable, matching the
++  // MODERNGEKKO_STATICRECOMP convention already used in this file. Unset,
++  // empty, or "0" leaves Dolphin's defaults untouched.
++  if (const char *widescreen = std::getenv("MODERNGEKKO_WIDESCREEN");
++      widescreen && *widescreen && *widescreen != '0') {
++    Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::ForceWide);
++    Config::SetBase(Config::GFX_WIDESCREEN_HACK, true);
++  }
+   const std::vector<std::string> audio_backends =
+       AudioCommon::GetSoundBackends();
+   if (impl->config.headless) {

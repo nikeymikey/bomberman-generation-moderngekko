@@ -32,6 +32,24 @@ param(
     [Parameter(HelpMessage = 'Delete an existing build directory whose generator does not match. Without this, a mismatch STOPS rather than discarding work.')]
     [switch] $Fresh,
 
+    [Parameter(HelpMessage = 'Also build the GUI launcher (moderngekko-launcher).')]
+    [switch] $WithLauncher,
+
+    [Parameter(HelpMessage = 'Six-character disc ID the launcher will accept. Without this the launcher has NO accept path and rejects every disc with "this disc is not the pinned patched release".')]
+    [string] $DiscId = 'GBGE5G',
+
+    [Parameter(HelpMessage = 'Optional: also require this exact main.dol SHA-256. Stricter ownership check; leave empty until the disc ID alone is known to work.')]
+    [string] $DolSha256 = '',
+
+    [Parameter(HelpMessage = 'Optional: branded display name shown by the frontend.')]
+    [string] $FrontendName = '',
+
+    [Parameter(HelpMessage = 'Optional: launcher executable filename, without extension.')]
+    [string] $LauncherName = '',
+
+    [Parameter(HelpMessage = 'Keep config, saves and logs in a User folder beside the executable instead of %LOCALAPPDATA%. Requires the moderngekko-portable-userdir patch.')]
+    [switch] $PortableUserDir,
+
     [Parameter(HelpMessage = 'Minimum Windows API level for MinGW builds. Dolphin never sets this and MinGW defaults to 0x0601 (Windows 7), which hides the Win8/Win10 APIs Dolphin uses. Ignored for MSVC. Empty string disables.')]
     [string] $WindowsTargetVersion = '0x0A00',
 
@@ -105,6 +123,28 @@ function Invoke-CMakeBuild([string] $Source, [string] $BuildDir, [string] $Targe
     $cfg += @("-DCMAKE_BUILD_TYPE=$Config", '-DBUILD_TESTING=OFF', "-DDOLRECOMP_ENABLE_LLVM=$llvmFlag")
     if ($EnableLlvm -and -not [string]::IsNullOrWhiteSpace($LlvmDir)) { $cfg += "-DLLVM_DIR=$LlvmDir" }
 
+    # ---- Branded build -------------------------------------------------------
+    # moderngekko-launcher's PrepareDisc() only has an accept path inside
+    #   #ifdef MODERNGEKKO_REQUIRED_DISC_ID
+    # Without it every disc falls through to the #else and is rejected with
+    # "this disc is not the pinned patched release". These are cache variables,
+    # so they apply to both moderngekko-run and moderngekko-launcher.
+    if (-not [string]::IsNullOrWhiteSpace($DiscId)) {
+        $cfg += "-DMODERNGEKKO_REQUIRED_DISC_ID=$DiscId"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DolSha256)) {
+        $cfg += "-DMODERNGEKKO_REQUIRED_DOL_SHA256=$DolSha256"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FrontendName)) {
+        $cfg += "-DMODERNGEKKO_FRONTEND_NAME=$FrontendName"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LauncherName)) {
+        $cfg += "-DMODERNGEKKO_LAUNCHER_OUTPUT_NAME=$LauncherName"
+    }
+    if ($PortableUserDir) {
+        $cfg += '-DMODERNGEKKO_PORTABLE_USER_DIRECTORY=ON'
+    }
+
     # ---- MinGW: raise the Windows API level ---------------------------------
     # Dolphin never defines _WIN32_WINNT / NTDDI_VERSION; on MSVC the toolchain
     # defaults them to a Windows 10 level. MinGW defaults to 0x0601 (Windows 7),
@@ -131,8 +171,17 @@ function Invoke-CMakeBuild([string] $Source, [string] $BuildDir, [string] $Targe
     Invoke-NativeChecked -FilePath 'cmake' -ArgumentList $buildArgs -What "cmake build ($Label)" | Out-Null
 }
 
+if (-not [string]::IsNullOrWhiteSpace($DiscId)) {
+    Write-Host ("Branded build: accepting disc ID '{0}'" -f $DiscId) -ForegroundColor Cyan
+} elseif ($WithLauncher) {
+    Write-Host 'WARNING: no -DiscId given. The launcher will reject every disc.' -ForegroundColor Yellow
+}
+
 Invoke-CMakeBuild $dolSrc (Join-Path $dolSrc 'build') 'dolrecomp'        'DolRecomp'
 Invoke-CMakeBuild $mgSrc  (Join-Path $mgSrc  'build') 'moderngekko-port' 'ModernGekko'
+if ($WithLauncher) {
+    Invoke-CMakeBuild $mgSrc (Join-Path $mgSrc 'build') 'moderngekko-launcher' 'ModernGekko launcher'
+}
 
 $dolExe = Get-ChildItem -Path (Join-Path $dolSrc 'build') -Recurse -Filter 'dolrecomp.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 $portExe = Get-ChildItem -Path (Join-Path $mgSrc 'build') -Recurse -Filter 'moderngekko-port.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -142,3 +191,13 @@ if (-not $portExe) { throw "Build succeeded but moderngekko-port.exe was not fou
 Write-Host ''
 Write-Host ("dolrecomp        : {0}" -f $dolExe.FullName)  -ForegroundColor Green
 Write-Host ("moderngekko-port : {0}" -f $portExe.FullName) -ForegroundColor Green
+if ($WithLauncher) {
+    $launcherExe = Get-ChildItem -Path (Join-Path $mgSrc 'build') -Recurse -Filter 'ModernGekko.exe' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+    if (-not $launcherExe) {
+        $launcherExe = Get-ChildItem -Path (Join-Path $mgSrc 'build') -Recurse -Filter 'moderngekko-launcher.exe' -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+    }
+    if ($launcherExe) { Write-Host ("launcher         : {0}" -f $launcherExe.FullName) -ForegroundColor Green }
+    else { Write-Host 'launcher         : built, but the executable was not found by name' -ForegroundColor Yellow }
+}
