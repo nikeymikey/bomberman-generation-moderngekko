@@ -1,0 +1,266 @@
+--- a/tools/frontend_config.hpp
++++ b/tools/frontend_config.hpp
+@@ -27,6 +27,13 @@
+   bool show_fps_in_title = true;
+   bool fullscreen = false;
+   bool widescreen = false;
++  // Enabled mod packages, by .mgm directory name, in load order.
++  // mods_configured distinguishes "the launcher has chosen, and this is the
++  // set" from "nothing has ever chosen". An empty list with the flag set means
++  // deliberately no mods; the flag unset means fall back to loading everything
++  // discovered, so upgrading an existing config never silently disables mods.
++  std::vector<std::string> mods;
++  bool mods_configured = false;
+   std::string netplay_nickname = "Player";
+   std::string netplay_address = "127.0.0.1";
+   std::uint16_t netplay_port = 2626;
+--- a/tools/frontend_config.cpp
++++ b/tools/frontend_config.cpp
+@@ -143,6 +143,22 @@
+     } else if (key == "widescreen") {
+       if (!ParseBoolean(value, &config.widescreen))
+         return {.error = "widescreen must be true or false"};
++    } else if (key == "mods") {
++      config.mods_configured = true;
++      config.mods.clear();
++      std::size_t start = 0;
++      while (start <= raw_value.size()) {
++        const std::size_t comma = raw_value.find(',', start);
++        const std::string entry =
++            Trim(raw_value.substr(start, comma == std::string::npos
++                                             ? std::string::npos
++                                             : comma - start));
++        if (!entry.empty())
++          config.mods.push_back(entry);
++        if (comma == std::string::npos)
++          break;
++        start = comma + 1;
++      }
+     } else if (key == "nickname")
+       config.netplay_nickname = raw_value;
+     else if (key == "address")
+@@ -270,6 +286,24 @@
+     }
+     file << "controller" << i + 1 << '=' << config.controllers[i] << '\n';
+   }
++  // Written only once something has actually chosen. SaveConfig's other
++  // overload round-trips through LoadConfig, so writing an empty mods= here
++  // unconditionally would turn "never configured" into "explicitly none" the
++  // first time an unrelated setting was toggled.
++  if (config.mods_configured) {
++    file << "[Mods]\n" << "mods=";
++    for (std::size_t i = 0; i < config.mods.size(); ++i) {
++      if (config.mods[i].find_first_of("\r\n,") != std::string::npos) {
++        if (error)
++          *error = "mod package name cannot contain a newline or comma";
++        return false;
++      }
++      if (i != 0)
++        file << ',';
++      file << config.mods[i];
++    }
++    file << '\n';
++  }
+   file << "[Netplay]\n"
+        << "nickname=" << config.netplay_nickname << '\n'
+        << "address=" << config.netplay_address << '\n'
+--- a/tools/moderngekko_run.cpp
++++ b/tools/moderngekko_run.cpp
+@@ -16,6 +16,7 @@
+ #include <fstream>
+ #include <iostream>
+ #include <string>
++#include <system_error>
+ #include <thread>
+ #include <vector>
+ 
+@@ -260,8 +261,26 @@
+   config.graphics.widescreen = frontend_config.widescreen;
+   config.show_fps_in_title = frontend_config.show_fps_in_title;
+   if (use_default_mods) {
+-    config.mod_directories.push_back(executable_directory / "Mods");
+-    config.mod_directories.push_back(config.user_directory / "Mods");
++    const std::filesystem::path mod_roots[] = {executable_directory / "Mods",
++                                               config.user_directory / "Mods"};
++    if (frontend_config.mods_configured) {
++      // An explicit selection. DiscoverModSources sorts whatever it finds, so
++      // handing it one path per enabled package is also the only way to fix
++      // load order -- the order here is the order the launcher listed.
++      for (const std::string &name : frontend_config.mods) {
++        for (const std::filesystem::path &root : mod_roots) {
++          std::error_code ec;
++          const std::filesystem::path candidate = root / name;
++          if (std::filesystem::exists(candidate, ec)) {
++            config.mod_directories.push_back(candidate);
++            break;
++          }
++        }
++      }
++    } else {
++      for (const std::filesystem::path &root : mod_roots)
++        config.mod_directories.push_back(root);
++    }
+   }
+ 
+   if (!netplay_role && !frontend_config.controller.empty()) {
+--- a/tools/moderngekko_launcher.cpp
++++ b/tools/moderngekko_launcher.cpp
+@@ -498,6 +498,88 @@
+   const fs::path sibling = self.parent_path() / runner;
+   return fs::is_regular_file(sibling) ? sibling : runner;
+ }
++// ---- Mods ------------------------------------------------------------------
++//
++// A .mgm package is a DIRECTORY whose name is the mod ID and which contains
++// the platform library as "mod" (see DiscoverModSources). An optional mod.ini
++// beside that library supplies a display name and version.
++//
++// Reading a plain text file is a deliberate choice over calling
++// moderngekko_get_mod() in each library: loading a third-party DLL executes
++// its DllMain and static initialisers, and doing that merely to render a label
++// would run a mod's code before the user has enabled anything. A mod without a
++// mod.ini simply shows its ID.
++struct ModPackage
++{
++  std::string directory;
++  std::string display_name;
++  std::string version;
++  bool enabled = true;
++};
++
++std::string ModTrim(const std::string& text)
++{
++  const std::size_t first = text.find_first_not_of(" \t");
++  if (first == std::string::npos)
++    return {};
++  const std::size_t last = text.find_last_not_of(" \t\r");
++  return text.substr(first, last - first + 1);
++}
++
++void ReadModManifest(const fs::path& package, ModPackage* out)
++{
++  std::ifstream file(package / "mod.ini");
++  if (!file)
++    return;
++  std::string line;
++  while (std::getline(file, line))
++  {
++    const std::string trimmed = ModTrim(line);
++    if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';' || trimmed[0] == '[')
++      continue;
++    const std::size_t separator = trimmed.find('=');
++    if (separator == std::string::npos)
++      continue;
++    const std::string key = ModTrim(trimmed.substr(0, separator));
++    const std::string value = ModTrim(trimmed.substr(separator + 1));
++    if (key == "name" && !value.empty())
++      out->display_name = value;
++    else if (key == "version" && !value.empty())
++      out->version = value;
++  }
++}
++
++std::vector<ModPackage> ScanModPackages(const std::vector<fs::path>& roots)
++{
++  std::vector<ModPackage> packages;
++  for (const fs::path& root : roots)
++  {
++    std::error_code ec;
++    if (!fs::is_directory(root, ec))
++      continue;
++    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
++    {
++      if (!it->is_directory(ec) || it->path().extension() != ".mgm")
++        continue;
++      const std::string name = it->path().filename().string();
++      // The runner resolves a package name against the executable directory
++      // first, so a duplicate in the user directory is shadowed, not listed
++      // twice.
++      if (std::any_of(packages.begin(), packages.end(),
++                      [&](const ModPackage& p) { return p.directory == name; }))
++        continue;
++      ModPackage package;
++      package.directory = name;
++      package.display_name = it->path().stem().string();
++      ReadModManifest(it->path(), &package);
++      packages.push_back(std::move(package));
++    }
++  }
++  std::sort(packages.begin(), packages.end(),
++            [](const ModPackage& a, const ModPackage& b) { return a.directory < b.directory; });
++  return packages;
++}
++
+ } // namespace
+ 
+ int main(int argc, char** argv)
+@@ -543,6 +625,18 @@
+     return 2;
+   }
+ 
++  std::vector<ModPackage> mod_packages =
++      ScanModPackages({release_directory / "Mods", user_directory / "Mods"});
++  // No recorded selection means nothing has chosen yet, which is exactly the
++  // runner's default of loading everything it finds -- so show them all ticked
++  // rather than inventing a decision the user never made.
++  if (config.mods_configured)
++  {
++    for (ModPackage& package : mod_packages)
++      package.enabled = std::find(config.mods.begin(), config.mods.end(),
++                                  package.directory) != config.mods.end();
++  }
++
+ #if defined(__linux__)
+   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, use_wayland ? "wayland" : "x11");
+ #endif
+@@ -978,6 +1072,50 @@
+         dialog.error = std::move(error);
+       }
+     }
++    ImGui::Spacing();
++    ImGui::TextUnformatted("Mods");
++    if (mod_packages.empty())
++    {
++      ImGui::TextDisabled("None found in Mods\\ beside the launcher or in the user folder.");
++    }
++    else
++    {
++      for (ModPackage& package : mod_packages)
++      {
++        std::string label = package.display_name;
++        if (!package.version.empty())
++          label += "  " + package.version;
++        label += "##mod_" + package.directory;
++        if (ImGui::Checkbox(label.c_str(), &package.enabled))
++        {
++          // Rebuild the whole list rather than inserting or erasing one entry:
++          // the order written here is the order the runner loads in, and
++          // rebuilding keeps that equal to the order shown on screen.
++          const std::vector<std::string> previous_mods = config.mods;
++          const bool previous_configured = config.mods_configured;
++          config.mods.clear();
++          for (const ModPackage& entry : mod_packages)
++          {
++            if (entry.enabled)
++              config.mods.push_back(entry.directory);
++          }
++          config.mods_configured = true;
++          std::string error;
++          if (!moderngekko::frontend::SaveConfig(user_directory, config, &error))
++          {
++            package.enabled = !package.enabled;
++            config.mods = previous_mods;
++            config.mods_configured = previous_configured;
++            std::lock_guard lock(dialog.mutex);
++            dialog.error = std::move(error);
++          }
++        }
++        if (ImGui::IsItemHovered())
++          ImGui::SetTooltip("%s", package.directory.c_str());
++      }
++      ImGui::TextDisabled("Each enabled mod drops its 16 KB code region to the fallback JIT.");
++    }
++
+     const bool previous_show_fps_in_title = show_fps_in_title;
+     if (ImGui::Checkbox("Show FPS in window title", &show_fps_in_title))
+     {

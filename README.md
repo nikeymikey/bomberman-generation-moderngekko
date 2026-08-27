@@ -309,8 +309,16 @@ executes once at boot, yet:
 ```
 
 Identical `lr` and stack pointer, so that is one guest call dispatched to the
-hook twice. It is intermittent, not universal -- in the same run one of four
-fires on another address was a duplicate.
+hook twice. It is intermittent, not universal. Over a longer session:
+
+```
+[chain-test]   0x80084110  fires=3270  same-(lr,sp) repeats=73
+```
+
+so roughly 2% of dispatches are duplicates -- and that 2% is an upper bound,
+because a loop calling one function repeatedly from a single call site produces
+identical `(lr, sp)` pairs too. The entry point is the only address where the
+result is unambiguous, since it executes exactly once.
 
 The mechanism is the passthrough guard in the demoted-chunk path.
 `StaticRecompCore_Run.cpp:218` dispatches the host call, and because a
@@ -338,6 +346,45 @@ unverified until a patch is actually instrumented.
 `ModManager::Dispatch` saves the CPUState, calls each entry hook, then restores
 it, and returns `false` when no patch is registered so the original still runs.
 Changing behaviour requires `RECOMP_PATCH`, which replaces the function.
+
+### Choosing mods in the launcher
+
+The launcher lists every `.mgm` package it finds in `Mods\\` beside the
+executable and in the user folder, with a checkbox each. The selection is
+stored in `config.ini`:
+
+```ini
+[Mods]
+mods=chain_test.mgm,another_mod.mgm
+```
+
+Order in that list is load order, which is the one thing plain discovery cannot
+express -- `DiscoverModSources` sorts whatever it finds. The runner reads the
+same key, so a selection made in the launcher also applies to a direct
+`moderngekko-run` invocation; `--mods` and `--no-mods` still override it.
+
+A **missing** `mods=` key is not the same as an empty one. Missing means nothing
+has chosen yet, and the runner keeps its default of loading everything it finds,
+so adding this to an existing install never silently disables someone's mods.
+An empty list means deliberately none. `SaveConfig` writes the key only once
+something has actually chosen, because its other overload round-trips through
+`LoadConfig` and would otherwise turn "never configured" into "explicitly none"
+the first time an unrelated setting was toggled.
+
+The launcher reads each package's name and version from an optional `mod.ini`
+inside it, written by `Build-Mod.ps1`:
+
+```ini
+id=chain_test
+name=Chain Test
+version=1.0.0
+```
+
+Reading a text file rather than calling `moderngekko_get_mod()` in each library
+is deliberate: loading a third-party DLL runs its `DllMain` and static
+initialisers, and doing that merely to render a label would execute a mod's code
+before the user has enabled anything. A package with no `mod.ini` is listed
+under its directory name.
 
 ### Packaging
 

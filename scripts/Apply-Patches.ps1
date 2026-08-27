@@ -89,6 +89,16 @@ $patches = @(
         # Host-side only; the generated module never touches Common::Random.
         ClearsModuleCache = $false
         Why     = 'stop the thread_local PRNG destructor faulting in mbedtls at thread detach (silent shutdown 0xC0000005)'
+    },
+    @{
+        Name    = 'moderngekko-mods-ui'
+        File    = 'moderngekko-mods-ui.patch'
+        Repo    = 'lib\ModernGekko'
+        Marker  = @{ Path = 'tools\frontend_config.hpp'; Pattern = 'mods_configured' }
+        # Frontend, launcher and runner argument handling only. The generated
+        # module is untouched, so cached modules stay valid.
+        ClearsModuleCache = $false
+        Why     = 'mods= key in config.ini, launcher checkboxes, and per-package mod loading in the runner'
     }
 )
 

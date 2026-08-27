@@ -32,6 +32,12 @@ param(
     [Parameter(HelpMessage = 'Override the mod ID. Empty uses the mod CMakeLists default.')]
     [string] $ModId = '',
 
+    [Parameter(HelpMessage = 'Override the display name shown in the launcher. Empty uses the mod CMakeLists default.')]
+    [string] $ModDisplayName = '',
+
+    [Parameter(HelpMessage = 'Override the mod version. Empty uses the mod CMakeLists default.')]
+    [string] $ModVersion = '',
+
     [string] $Generator = 'Ninja',
 
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo')]
@@ -66,7 +72,9 @@ $cfg = @(
     "-DMODERNGEKKO_SOURCE_DIR=$mgSource",
     "-DMOD_GAME_ID=$GameId"
 )
-if (-not [string]::IsNullOrWhiteSpace($ModId)) { $cfg += "-DMOD_ID=$ModId" }
+if (-not [string]::IsNullOrWhiteSpace($ModId))          { $cfg += "-DMOD_ID=$ModId" }
+if (-not [string]::IsNullOrWhiteSpace($ModDisplayName)) { $cfg += "-DMOD_DISPLAY_NAME=$ModDisplayName" }
+if (-not [string]::IsNullOrWhiteSpace($ModVersion))     { $cfg += "-DMOD_VERSION=$ModVersion" }
 
 Write-Host ''
 Write-Host ("Configuring {0}" -f $ModPath) -ForegroundColor Cyan
@@ -91,8 +99,39 @@ if (-not (Test-Path $library)) {
     throw "$($package.Name) has no mod.dll -- DiscoverModSources would skip it. Check OUTPUT_NAME/PREFIX in the mod's CMakeLists."
 }
 
+# The launcher lists mods by reading this file rather than by loading each
+# mod library to call moderngekko_get_mod(), which would execute third-party
+# code just to render a label. Values are read back out of the CMake cache so
+# the manifest describes what was actually built, not what we assumed.
+$cache = Join-Path $BuildDir 'CMakeCache.txt'
+if (-not (Test-Path $cache)) { throw "No CMakeCache.txt in $BuildDir -- cannot determine the mod's identity." }
+$cacheText = Get-Content -LiteralPath $cache
+function Get-CacheValue([string] $Name) {
+    $line = $cacheText | Where-Object { $_ -match "^$([regex]::Escape($Name)):[A-Z]+=" } | Select-Object -First 1
+    if (-not $line) { return '' }
+    return $line.Substring($line.IndexOf('=') + 1)
+}
+$manifestId      = Get-CacheValue 'MOD_ID'
+$manifestName    = Get-CacheValue 'MOD_DISPLAY_NAME'
+$manifestVersion = Get-CacheValue 'MOD_VERSION'
+if ([string]::IsNullOrWhiteSpace($manifestId)) { throw 'MOD_ID is not set in the CMake cache.' }
+
+$manifest = @(
+    '# Read by the launcher to list this mod. Optional: a package without it',
+    '# is listed under its directory name.',
+    "id=$manifestId"
+)
+if (-not [string]::IsNullOrWhiteSpace($manifestName))    { $manifest += "name=$manifestName" }
+if (-not [string]::IsNullOrWhiteSpace($manifestVersion)) { $manifest += "version=$manifestVersion" }
+# WriteAllLines with an explicit no-BOM encoding: Set-Content -Encoding UTF8
+# emits a byte order mark on PowerShell 5.1, and a BOM on the first line
+# would only be harmless for as long as that line stays a comment.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllLines((Join-Path $package.FullName 'mod.ini'), $manifest, $utf8NoBom)
+
 Write-Host ''
 Write-Host ("Built {0}" -f $package.Name) -ForegroundColor Green
+Write-Host ("  manifest: id={0} name={1} version={2}" -f $manifestId, $manifestName, $manifestVersion)
 Write-Host ("  {0}  ({1:N0} bytes)" -f $library, (Get-Item $library).Length)
 
 if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
