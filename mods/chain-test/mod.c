@@ -51,6 +51,27 @@
 
 #include <stdio.h>
 
+/*
+ * Symbol names, when a map has been generated.
+ *
+ * Build-Symbols.ps1 produces DolRecomp's <stem>_symbols.h from
+ * symbols/GBGE5G.map, and Build-Mod.ps1 -SymbolHeader force-includes it. The
+ * dependency is deliberately optional: with no header the mod still compiles
+ * against the raw addresses, so a map is an ergonomic improvement rather than
+ * a prerequisite for building mods.
+ *
+ * Placeholder names look like fn_80084110 today. As functions are identified
+ * the map is edited, the header regenerates, and only the #define below
+ * changes -- the address stays the identity throughout.
+ */
+#if defined(DOLRECOMP_SYMBOL_fn_80084110)
+#  define ADDRESS_A       DOLRECOMP_SYMBOL_fn_80084110
+#  define ADDRESS_SOURCE  "symbol header"
+#else
+#  define ADDRESS_A       0x80084110u
+#  define ADDRESS_SOURCE  "raw addresses (no symbol map)"
+#endif
+
 typedef struct HookStats {
     const char *label;
     unsigned long long fires;
@@ -89,17 +110,19 @@ static void hook_b(CPUState *state)     { record(&g_fn_b,  state); }
 
 static const ModernGekkoModHook hooks[] = {
     RECOMP_HOOK(0x80003140u, hook_entry),
-    RECOMP_HOOK(0x80084110u, hook_a),
+    RECOMP_HOOK(ADDRESS_A, hook_a),
     RECOMP_HOOK(0x80036AF8u, hook_b),
 };
 
 static void mod_loaded(const ModernGekkoModHostApi *api)
 {
     fprintf(stderr,
-            "[chain-test] loaded: host ABI %u, CPUState %u bytes, %u hooks\n",
+            "[chain-test] loaded: host ABI %u, CPUState %u bytes, %u hooks, "
+            "addresses from %s\n",
             api ? api->abi_version : 0u,
             (unsigned)sizeof(CPUState),
-            (unsigned)(sizeof(hooks) / sizeof(hooks[0])));
+            (unsigned)(sizeof(hooks) / sizeof(hooks[0])),
+            ADDRESS_SOURCE);
     fflush(stderr);
 }
 

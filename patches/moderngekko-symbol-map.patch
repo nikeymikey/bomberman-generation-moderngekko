@@ -1,0 +1,72 @@
+--- a/tools/port_command_line.hpp
++++ b/tools/port_command_line.hpp
+@@ -17,6 +17,9 @@
+   std::string opt_level;
+   std::string backend;
+   fs::path output;
++  // Optional linker MAP handed to DolRecomp. Without it DolRecomp emits no
++  // <stem>_symbols.h at all, so mods can only reference raw addresses.
++  fs::path symbol_map;
+   std::vector<std::string> runner_arguments;
+   pgo::PgoBuildOptions pgo;
+   pgo::ManifestFacts pgo_facts;
+@@ -84,6 +87,8 @@
+       parsed.build.opt_level = argv[++i];
+     else if (argument == "--output" && i + 1 < argc)
+       parsed.build.output = fs::path(argv[++i]);
++    else if (argument == "--map" && i + 1 < argc)
++      parsed.build.symbol_map = fs::path(argv[++i]);
+     else if (argument == "--profile-dir" && i + 1 < argc && is_pgo_run)
+       parsed.pgo_run.profile_dir = fs::path(argv[++i]);
+     else if (argument == "--llvm-profdata" && i + 1 < argc && is_pgo_run)
+--- a/tools/moderngekko_port.cpp
++++ b/tools/moderngekko_port.cpp
+@@ -670,6 +670,22 @@
+       pgo_compile_flags += " -Werror=profile-instr-out-of-date";
+   }
+ 
++  // The map changes generated output, so it has to change the cache key too --
++  // otherwise adding or editing one would silently reuse a module built
++  // without it. Hashing the contents rather than the path means renaming the
++  // file does not force a rebuild and editing it does.
++  std::string symbol_map_identity;
++  if (!options.symbol_map.empty())
++  {
++    const auto symbol_map_hash = moderngekko::HashFileSha256(options.symbol_map);
++    if (!symbol_map_hash)
++    {
++      std::cerr << "symbol map is unreadable: " << options.symbol_map << '\n';
++      return std::nullopt;
++    }
++    symbol_map_identity = "|symbol_map=" + *symbol_map_hash;
++  }
++
+   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
+       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
+       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
+@@ -677,7 +693,7 @@
+       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
+       *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
+-      DolRecompCodegenIdentity();
++      DolRecompCodegenIdentity() + symbol_map_identity;
+   std::ostringstream key_tail;
+   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
+   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
+@@ -757,6 +773,8 @@
+   std::string generate = Quote(dolrecomp) + " -j" +
+                          std::to_string(std::max(1u, std::thread::hardware_concurrency())) +
+                          " --backend=" + options.backend + " ";
++  if (!options.symbol_map.empty())
++    generate += "--map " + Quote(options.symbol_map.string()) + " ";
+   if (game.platform == moderngekko::GamePlatform::GameCube)
+     generate += "--cpu gekko --gamecube " + Quote(recomp_dol) + " " + Quote(generated_parent);
+   else
+@@ -1121,6 +1139,7 @@
+ {
+   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
+                "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
++               "               [--map path]   linker MAP of function names; without it DolRecomp emits no symbol header\n"
+                "       moderngekko-port run <game-root> [build options] [-- runner options]\n"
+                "       moderngekko-port pgo-run <game-root> [--backend c|llvm] [--toolchain auto|clang] [--opt-level 0-3]\n"
+                "               [--output path] [--profile-dir path] [--llvm-profdata path] [--keep-work]\n"

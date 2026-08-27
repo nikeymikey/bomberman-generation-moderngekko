@@ -24,7 +24,10 @@ param(
     [int] $OptLevel = 2,
 
     [Parameter(HelpMessage = 'Directory for compiled modules. No default.')]
-    [string] $OutputDir
+    [string] $OutputDir,
+
+    [Parameter(HelpMessage = 'Linker MAP of function names. Without it DolRecomp emits no <stem>_symbols.h, so mods can only use raw addresses. Requires the moderngekko-symbol-map patch.')]
+    [string] $MapPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,12 +51,21 @@ Write-Host ("Inspecting {0}" -f $gameRoot) -ForegroundColor Cyan
 Invoke-Native -FilePath $portExe.FullName -ArgumentList @('inspect', $gameRoot) | Out-Null
 
 Write-Host ("Building module (backend={0} toolchain={1} opt={2})" -f $Backend, $Toolchain, $OptLevel) -ForegroundColor Cyan
+$portArgs = @('build', $gameRoot,
+              '--backend',   $Backend,
+              '--toolchain', $Toolchain,
+              '--opt-level', "$OptLevel",
+              '--output',    $OutputDir)
+if (-not [string]::IsNullOrWhiteSpace($MapPath)) {
+    if (-not (Test-Path $MapPath)) { throw "Symbol map not found: $MapPath" }
+    # Resolved to a full path: moderngekko-port passes this straight to
+    # DolRecomp, which runs with its own working directory.
+    $portArgs += @('--map', (Resolve-Path -LiteralPath $MapPath).Path)
+    Write-Host ("Symbol map: {0}" -f $MapPath) -ForegroundColor Cyan
+}
+
 Invoke-NativeChecked -FilePath $portExe.FullName `
-    -ArgumentList @('build', $gameRoot,
-                    '--backend',   $Backend,
-                    '--toolchain', $Toolchain,
-                    '--opt-level', "$OptLevel",
-                    '--output',    $OutputDir) `
+    -ArgumentList $portArgs `
     -What 'moderngekko-port build' | Out-Null
 
 $modules = @(Get-ChildItem -Path $OutputDir -Recurse -Include '*.dll', '*.mgm' -ErrorAction SilentlyContinue)

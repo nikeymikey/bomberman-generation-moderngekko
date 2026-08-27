@@ -99,6 +99,17 @@ $patches = @(
         # module is untouched, so cached modules stay valid.
         ClearsModuleCache = $false
         Why     = 'mods= key in config.ini, launcher checkboxes, and per-package mod loading in the runner'
+    },
+    @{
+        Name    = 'moderngekko-symbol-map'
+        File    = 'moderngekko-symbol-map.patch'
+        Repo    = 'lib\ModernGekko'
+        Marker  = @{ Path = 'tools\port_command_line.hpp'; Pattern = 'symbol_map' }
+        # Adds --map to moderngekko-port. The map is folded into the module
+        # cache key by the patch itself, so changing a map rebuilds without
+        # needing the cache cleared here.
+        ClearsModuleCache = $false
+        Why     = 'pass a linker MAP through to DolRecomp so it emits <stem>_symbols.h for mods'
     }
 )
 

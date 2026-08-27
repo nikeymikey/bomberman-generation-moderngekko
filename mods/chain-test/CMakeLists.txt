@@ -8,6 +8,7 @@ set(MOD_GAME_ID     ""            CACHE STRING "Target disc ID")
 set(MOD_ID          "chain_test"  CACHE STRING "Mod ID")
 set(MOD_VERSION     "1.0.0"       CACHE STRING "Mod version")
 set(MOD_DISPLAY_NAME "Chain Test" CACHE STRING "Mod display name")
+set(MOD_SYMBOL_HEADER ""          CACHE FILEPATH "DolRecomp generated symbol header")
 
 if(NOT IS_DIRECTORY "${MODERNGEKKO_SOURCE_DIR}/include/moderngekko")
     message(FATAL_ERROR "Set MODERNGEKKO_SOURCE_DIR to the ModernGekko checkout")
@@ -29,6 +30,17 @@ target_compile_definitions(mod PRIVATE
 # under the exact name "mod" -- DiscoverModSources() looks for
 # <package>/mod<suffix> and reports "package has no platform mod library"
 # otherwise. PREFIX is cleared so MinGW does not emit libmod.dll.
+# Force-included, so DOLRECOMP_SYMBOL_* is visible without the mod source
+# having to know where the header lives. Optional by design: the mod still
+# builds against raw addresses when no map has been generated.
+if(NOT MOD_SYMBOL_HEADER STREQUAL "")
+    if(MSVC)
+        target_compile_options(mod PRIVATE "/FI${MOD_SYMBOL_HEADER}")
+    else()
+        target_compile_options(mod PRIVATE "-include${MOD_SYMBOL_HEADER}")
+    endif()
+endif()
+
 set_target_properties(mod PROPERTIES
     PREFIX ""
     OUTPUT_NAME "mod"

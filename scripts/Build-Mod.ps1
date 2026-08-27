@@ -38,6 +38,9 @@ param(
     [Parameter(HelpMessage = 'Override the mod version. Empty uses the mod CMakeLists default.')]
     [string] $ModVersion = '',
 
+    [Parameter(HelpMessage = 'DolRecomp symbol header to force-include, from Build-Symbols.ps1. Lets the mod use names instead of raw addresses.')]
+    [string] $SymbolHeader = '',
+
     [string] $Generator = 'Ninja',
 
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo')]
@@ -75,6 +78,10 @@ $cfg = @(
 if (-not [string]::IsNullOrWhiteSpace($ModId))          { $cfg += "-DMOD_ID=$ModId" }
 if (-not [string]::IsNullOrWhiteSpace($ModDisplayName)) { $cfg += "-DMOD_DISPLAY_NAME=$ModDisplayName" }
 if (-not [string]::IsNullOrWhiteSpace($ModVersion))     { $cfg += "-DMOD_VERSION=$ModVersion" }
+if (-not [string]::IsNullOrWhiteSpace($SymbolHeader)) {
+    if (-not (Test-Path $SymbolHeader)) { throw "Symbol header not found: $SymbolHeader" }
+    $cfg += "-DMOD_SYMBOL_HEADER=$((Resolve-Path -LiteralPath $SymbolHeader).Path)"
+}
 
 Write-Host ''
 Write-Host ("Configuring {0}" -f $ModPath) -ForegroundColor Cyan
