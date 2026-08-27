@@ -55,6 +55,7 @@ are guarding against.
 | `Check-BeforePush.ps1` | Audit the whole commit history before a first push |
 | `Test-WinApiFix.ps1` | Recompile one file with/without a fix, to test a theory cheaply |
 | `Enable-CrashDumps.ps1` | Point Windows Error Reporting at `build/crashdumps/` for one exe (needs elevation) |
+| `Build-Mod.ps1` | Build a mod into a `.mgm` package and optionally install it |
 
 ### `tools/`
 
@@ -62,6 +63,7 @@ are guarding against.
 |---|---|
 | `parse_minidump.py` | Name the faulting module and address in a `.dmp`, no debugger needed |
 | `dump_stack.py` | Recover a call chain from a `.dmp` by scanning the crashing thread's stack against `nm` output |
+| `find_functions.py` | Recover the function inventory from `main.dol` by decoding every `bl`; can emit a DolRecomp `--map` |
 
 ## Layout
 
@@ -256,6 +258,60 @@ config teardown before it ever reached thread detach.
 `dolphin-tls-prng-leak.patch` makes it a never-deleted pointer: a few hundred
 bytes per thread that draws randomness, in exchange for removing the whole class
 of shutdown-ordering faults.
+
+## Mods
+
+The mod chain is proven end to end on this game by `mods/chain-test`, a mod
+that registers three entry hooks, counts them and changes nothing. Its result:
+
+```
+mod loaded: chain_test 1.0.0
+[chain-test] loaded: host ABI 1, CPUState 3536 bytes, 3 hooks
+[chain-test] hooks fired: 0x80003140=2  0x80084110=340  0x80036AF8=0
+```
+
+### Where mod addresses come from
+
+DolRecomp gives you **no** function inventory unless you pass `--map`: the 105
+`func_XXXXXXXX` symbols in its generated header are partition boundaries, 103
+of the 104 gaps being exactly 16384 bytes. `tools/find_functions.py` recovers
+the real inventory instead — 3266 call targets, all inside `.text` — by
+decoding every `bl` in `main.dol`.
+
+`bl` targets specifically, not arbitrary addresses. DolRecomp compiles a `bl`
+as `ctx->pc = <target>; return;`, handing control back to the block dispatcher,
+which consults the mod manager. Control flow *within* a chunk is a plain
+`goto`, so a hook on a mid-function address would never fire.
+
+### What a hook costs
+
+`ChunkContainsHostCall` (`StaticRecompCore_SMC.cpp:248`) asks the mod manager
+whether any registered address falls inside each 16 KB chunk. If one does, that
+whole chunk is demoted for the rest of the run:
+
+```
+[staticrecomp] mod fallback: chunk [0x80003100,0x80005600)
+```
+
+Demoted means Dolphin's `Jit64` (`StaticRecompCore_Run.cpp:250`) rather than
+the statically recompiled native code — still JIT-compiled, not interpreted;
+only *forced* fallback ranges go to the interpreter. So the unit of cost is
+**16 KB of guest code per hook**, and several hooks scattered across the
+address space cost far more than several hooks in one place.
+
+### Hooks cannot change behaviour
+
+`ModManager::Dispatch` saves the CPUState, calls each entry hook, then restores
+it, and returns `false` when no patch is registered so the original still runs.
+Changing behaviour requires `RECOMP_PATCH`, which replaces the function.
+
+### Packaging
+
+A `.mgm` package is a *directory* named `<mod-id>.mgm` containing the platform
+library under the exact name `mod` (`mod.dll`). Anything else is reported as
+"package has no platform mod library". The runner searches `<exe dir>\Mods`
+and `<user dir>\Mods`; `--mods <path>` adds a specific package or directory
+and `--no-mods` suppresses only the two defaults.
 
 ## Branded launcher and the shipping layout
 
