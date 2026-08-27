@@ -50,9 +50,18 @@ are guarding against.
 | `Extract-Iso.ps1` | `dolrecomp extract` → `extracted/<slug>/` |
 | `Build-Module.ps1` | `moderngekko-port build` → a native module |
 | `Run-Game.ps1` | `moderngekko-port run`, under a timeout, with a log summary |
+| `Install-Module.ps1` | copy the built module where the launcher's runner finds it |
 | `Verify-Gitignore.ps1` | Prove the ignore rules work in both directions |
 | `Check-BeforePush.ps1` | Audit the whole commit history before a first push |
 | `Test-WinApiFix.ps1` | Recompile one file with/without a fix, to test a theory cheaply |
+| `Enable-CrashDumps.ps1` | Point Windows Error Reporting at `build/crashdumps/` for one exe (needs elevation) |
+
+### `tools/`
+
+| Tool | Purpose |
+|---|---|
+| `parse_minidump.py` | Name the faulting module and address in a `.dmp`, no debugger needed |
+| `dump_stack.py` | Recover a call chain from a `.dmp` by scanning the crashing thread's stack against `nm` output |
 
 ## Layout
 
@@ -166,13 +175,119 @@ with the API level raised. Both gates were confirmed independently: `Timer.cpp`
 for `_WIN32_WINNT`, `WindowsDevice.cpp` for the separate `NTDDI_VERSION`
 (`cfgmgr32.h`) gate.
 
-### 3. `dolrecomp extract` and gitlab-hosted bzip2
+### 3. Empty `GCPadNew.ini` stub deadlocks controller setup
+
+On a GameCube branded build the launcher refuses to start with:
+
+```
+GCPadNew.ini has no configured controller device
+```
+
+Dolphin's config system creates the controller profile as a **0-byte stub** on
+startup (alongside `FreeLook.ini`, `GCKeyNew.ini` and others). The launcher's
+check was existence-only:
+
+```cpp
+bool ControllerConfigExists(...) {
+  return fs::is_regular_file(ControllerConfigPath(user_directory), ec);
+}
+```
+
+so the stub counts as "configured". `ReadConfiguredControllers()` then finds no
+`[GCPad1]` section, and the caller bails — while the code that would *write* a
+profile is only reached when the file is absent. The profile can never be
+created. `EnsureControllerConfig()` is fooled the same way and reports "using
+existing controller profile" for an empty file.
+
+`patches/moderngekko-controller-stub.patch` makes the check ask whether a usable
+device is configured rather than whether a file exists.
+
+Note also that `MODERNGEKKO_GAMECUBE_CONTROLLERS` defaults **OFF**, so the
+frontend writes Wii Remote profiles (`[Wiimote1]`) and leaves `GCPadNew.ini`
+empty even when a pad is selected. `Build-Tools.ps1` sets it ON by default.
+
+### 4. `dolrecomp extract` and gitlab-hosted bzip2
 
 Dolphin pins `Externals/bzip2` to `https://gitlab.com/bzip2/bzip2.git`, which
 returns HTTP 403. `Init-Repo.ps1` rewrites it to
 `https://github.com/libarchive/bzip2.git`, which carries the **same pinned
 commit** (`6a8690fc8d26c815e798c588f796eabe9d684cf0`) — so the checkout is
 byte-identical to upstream's intent, not a version substitution.
+
+### 5. Exit-time `0xC0000005` — the window outliving the config
+
+`Runtime::~Runtime()` called `UICommon::Shutdown()` — and so `Config::Shutdown()`,
+which clears every config layer — *before* `~PlatformWin32()` destroyed the render
+window. `DestroyWindow()` dispatches `WM_KILLFOCUS` into the window procedure
+synchronously, and that handler does:
+
+```cpp
+Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);   // PlatformWin32.cpp:406
+```
+
+`Config::Set` is `GetLayer(layer)->Set(...)` with no null check (`Config.h:114`),
+so with the layers already gone the window's own destruction killed the process:
+
+```
+~Runtime -> ~PlatformWin32 -> WndProc -> Config::Set<float>
+         -> Config::GetLayer (null) -> Config::Layer::Set   ← read of 0x20
+```
+
+It surfaced as `0xC0000005` when the runner was launched directly and
+`0xC000041D` (`FATAL_USER_CALLBACK_EXCEPTION`) through the launcher — the same
+fault, wrapped because it was raised inside a user callback.
+`moderngekko-shutdown-order.patch` destroys the window first, restoring plain
+reverse-of-construction order.
+
+### 6. thread_local PRNG destructor faulting at thread detach
+
+`Common/Random.cpp` declares `static thread_local EntropySeededPRNG s_esprng`.
+MinGW runs thread_local destructors from a TLS callback (`run_dtor_list`) at
+thread and process detach, by which point the thread's storage is already
+released, so `~EntropySeededPRNG` freed dead memory:
+
+```
+tls_callback -> run_dtor_list -> ~EntropySeededPRNG
+             -> mbedtls_hmac_drbg_free -> mbedtls_md_free   ← 0xC0000005
+```
+
+This was invisible until issue 5 was fixed — the process used to die in the
+config teardown before it ever reached thread detach.
+`dolphin-tls-prng-leak.patch` makes it a never-deleted pointer: a few hundred
+bytes per thread that draws randomness, in exchange for removing the whole class
+of shutdown-ordering faults.
+
+## Branded launcher and the shipping layout
+
+`Build-Tools.ps1 -WithLauncher` builds the ImGui/SDL3 launcher, which browses
+for an ISO, extracts it and plays. Two options make it work for one game:
+
+* `-DiscId GBGE5G` — **required**. `PrepareDisc()` has its only accept path
+  inside `#ifdef MODERNGEKKO_REQUIRED_DISC_ID`; without it every disc is
+  rejected with "this disc is not the pinned patched release" (the `#else`
+  branch, whose `#if` side is hardcoded Sonic Riders logic upstream).
+* `-PortableUserDir` — keeps config, saves and logs in `User\` beside the
+  executable instead of `%LOCALAPPDATA%\moderngekko`.
+
+The launcher does **not** pass `--module`, so the runner falls back to its own
+search order:
+
+1. `--module <path>` (what `moderngekko-port` uses)
+2. `$env:STATICRECOMP_MODULE`
+3. `<exe dir>\g<DISCID>_recomp.dll`  ← the shipping layout
+4. `<user dir>\StaticRecompModules\g<DISCID>_recomp.dll`
+
+Without one of these it fails with "no native module was supplied".
+`Install-Module.ps1` puts the built module at option 3. A distributable folder
+therefore looks like:
+
+```
+ModernGekko.exe          launcher
+moderngekko-run.exe      runner
+gGBGE5G_recomp.dll       the recompiled game
+Mods/                    loaded from beside the executable
+User/                    config, saves, logs (portable build)
+```
 
 ## Toolchain: Ninja + MinGW GCC
 

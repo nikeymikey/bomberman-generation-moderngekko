@@ -14,7 +14,10 @@ param(
     [Parameter(Mandatory = $true, HelpMessage = 'Slug under extracted/. No default.')]
     [string] $Slug,
 
-    [Parameter(Mandatory = $true, HelpMessage = 'Directory holding compiled modules. No default.')]
+    # Not Mandatory: -Direct never uses it, and a mandatory parameter would make
+    # PowerShell prompt for a value that is then discarded. The non-Direct branch
+    # below still refuses to run without it -- there is no default.
+    [Parameter(HelpMessage = 'Directory holding compiled modules. Required unless -Direct. No default.')]
     [string] $OutputDir,
 
     [Parameter(Mandatory = $true, HelpMessage = 'Where to write the captured log.')]
@@ -33,7 +36,10 @@ param(
     [int] $TimeoutSeconds = 120,
 
     [Parameter(HelpMessage = 'Force 16:9 output with the projection hack. Requires the moderngekko-widescreen patch and a rebuilt runtime.')]
-    [switch] $Widescreen
+    [switch] $Widescreen,
+
+    [Parameter(HelpMessage = 'Run moderngekko-run.exe directly instead of via moderngekko-port. Reports the RUNNER''s own exit code, which port would otherwise flatten to 1.')]
+    [switch] $Direct
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,8 +58,28 @@ if ($logDir -and -not (Test-Path $logDir)) { New-Item -ItemType Directory -Force
 $outFile = "$LogPath.out"
 $errFile = "$LogPath.err"
 
-$argList = @('run', $gameRoot, '--backend', $Backend, '--toolchain', $Toolchain, '--output', $OutputDir)
-if ($RunnerArgs.Count -gt 0) { $argList += '--'; $argList += $RunnerArgs }
+if ($Direct) {
+    # moderngekko-port wraps the runner and returns its own status, so an
+    # abnormal child exit arrives as a bare 1 and the real code is lost. Going
+    # straight to the runner preserves it -- which is what a crash diagnosis
+    # needs. Requires the module to be installed beside the runner
+    # (Install-Module.ps1) so it can find it without --module.
+    $runExe = Get-ChildItem -Path (Join-Path $RepoRoot 'lib\ModernGekko\build') -Recurse -Filter 'moderngekko-run.exe' -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+    if (-not $runExe) { throw 'moderngekko-run.exe not found -- run Build-Tools.ps1 first.' }
+    $expectedModule = Join-Path $runExe.DirectoryName 'gGBGE5G_recomp.dll'
+    if (-not (Test-Path $expectedModule)) {
+        throw "Direct mode needs the module beside the runner. Expected: $expectedModule`nRun Install-Module.ps1 first."
+    }
+    $portExe = $runExe
+    $argList = @('--game', $gameRoot)
+    if ($RunnerArgs.Count -gt 0) { $argList += $RunnerArgs }
+    Write-Host 'Direct mode: bypassing moderngekko-port to capture the runner exit code.' -ForegroundColor Cyan
+} else {
+    if (-not $OutputDir) { throw 'OutputDir is required unless -Direct is used. Pass -OutputDir explicitly; there is deliberately no default.' }
+    $argList = @('run', $gameRoot, '--backend', $Backend, '--toolchain', $Toolchain, '--output', $OutputDir)
+    if ($RunnerArgs.Count -gt 0) { $argList += '--'; $argList += $RunnerArgs }
+}
 
 # Quote every argument: paths here contain spaces, and Start-Process joins
 # -ArgumentList without quoting.
@@ -110,6 +136,8 @@ if ($timedOut) {
         '0xC0000005' { $meaning = '  <-- ACCESS VIOLATION (crash)' }
         '0xC00000FD' { $meaning = '  <-- STACK OVERFLOW (crash)' }
         '0xC0000135' { $meaning = '  <-- MISSING DLL' }
+        '0xC000041D' { $meaning = '  <-- FATAL USER CALLBACK EXCEPTION (fault inside an OS-invoked callback: WndProc, or DllMain on unload)' }
+        '0xC0000005' { $meaning = '  <-- ACCESS VIOLATION' }
         '0x00000000' { $meaning = '  (clean exit)' }
     }
     Write-Host ("Outcome    : exited, code {0} ({1}){2}" -f $exitCode, $hex, $meaning)

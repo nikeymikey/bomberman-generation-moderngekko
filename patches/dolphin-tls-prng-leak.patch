@@ -1,0 +1,31 @@
+--- a/Source/Core/Common/Random.cpp
++++ b/Source/Core/Common/Random.cpp
+@@ -40,10 +40,26 @@
+   mbedtls_hmac_drbg_context m_context;
+ };
+ 
+-static thread_local EntropySeededPRNG s_esprng;
++// Deliberately a never-deleted pointer rather than a thread_local object.
++//
++// A thread_local with a non-trivial destructor is torn down by the MinGW TLS
++// callback (run_dtor_list) at thread/process detach. At process detach that
++// runs after the thread's storage and mbedtls's own state may already be gone,
++// so ~EntropySeededPRNG dereferenced released memory:
++//     0xC0000005 in mbedtls_md_free, reached from
++//     tls_callback -> run_dtor_list -> ~EntropySeededPRNG -> mbedtls_hmac_drbg_free
++// The fault was previously invisible because the process died earlier, in the
++// config teardown, before ever reaching thread detach.
++//
++// The cost is a few hundred bytes per thread that draws randomness, held for
++// the process lifetime. Never destroying it removes the whole class of
++// shutdown-ordering faults, and the OS reclaims it at exit regardless.
++static thread_local EntropySeededPRNG* s_esprng = nullptr;
+ 
+ void Generate(void* buffer, std::size_t size)
+ {
+-  s_esprng.Generate(buffer, size);
++  if (!s_esprng)
++    s_esprng = new EntropySeededPRNG();
++  s_esprng->Generate(buffer, size);
+ }
+ }  // namespace Common::Random

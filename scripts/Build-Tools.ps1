@@ -50,6 +50,9 @@ param(
     [Parameter(HelpMessage = 'Keep config, saves and logs in a User folder beside the executable instead of %LOCALAPPDATA%. Requires the moderngekko-portable-userdir patch.')]
     [switch] $PortableUserDir,
 
+    [Parameter(HelpMessage = 'Write GameCube pad profiles (GCPadNew.ini) instead of Wii Remote profiles. Required for a GameCube game, or the pad has no bindings. Defaults ON for this project.')]
+    [bool] $GameCubeControllers = $true,
+
     [Parameter(HelpMessage = 'Minimum Windows API level for MinGW builds. Dolphin never sets this and MinGW defaults to 0x0601 (Windows 7), which hides the Win8/Win10 APIs Dolphin uses. Ignored for MSVC. Empty string disables.')]
     [string] $WindowsTargetVersion = '0x0A00',
 
@@ -143,6 +146,12 @@ function Invoke-CMakeBuild([string] $Source, [string] $BuildDir, [string] $Targe
     }
     if ($PortableUserDir) {
         $cfg += '-DMODERNGEKKO_PORTABLE_USER_DIRECTORY=ON'
+    }
+    # Without this the frontend writes WiimoteNew.ini ([Wiimote1] sections) and
+    # leaves GCPadNew.ini empty, so a GameCube pad ends up with no bindings even
+    # though the launcher shows it as selected.
+    if ($GameCubeControllers) {
+        $cfg += '-DMODERNGEKKO_GAMECUBE_CONTROLLERS=ON'
     }
 
     # ---- MinGW: raise the Windows API level ---------------------------------

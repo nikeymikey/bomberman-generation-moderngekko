@@ -63,6 +63,32 @@ $patches = @(
         Marker  = @{ Path = 'tools\moderngekko_run.cpp'; Pattern = 'MODERNGEKKO_PORTABLE_USER_DIRECTORY' }
         ClearsModuleCache = $false
         Why     = 'adds a portable user directory beside the executable (opt-in via CMake)'
+    },
+    @{
+        Name    = 'moderngekko-controller-stub'
+        File    = 'moderngekko-controller-stub.patch'
+        Repo    = 'lib\ModernGekko'
+        Marker  = @{ Path = 'tools\frontend_config.cpp'; Pattern = 'Treat a profile with no usable device' }
+        ClearsModuleCache = $false
+        Why     = 'stop treating Dolphin''s empty GCPadNew.ini stub as a configured controller'
+    },
+    @{
+        Name    = 'moderngekko-shutdown-order'
+        File    = 'moderngekko-shutdown-order.patch'
+        Repo    = 'lib\ModernGekko'
+        Marker  = @{ Path = 'src\runtime\dolphin_runtime.cpp'; Pattern = 'Destroy the render window BEFORE' }
+        # Teardown ordering in ~Runtime only; the generated module is untouched.
+        ClearsModuleCache = $false
+        Why     = 'destroy the render window before Config::Shutdown, so DestroyWindow''s WM_KILLFOCUS does not write to a cleared config (exit-time 0xC0000005)'
+    },
+    @{
+        Name    = 'dolphin-tls-prng-leak'
+        File    = 'dolphin-tls-prng-leak.patch'
+        Repo    = 'lib\ModernGekko\vendor\dolphin'
+        Marker  = @{ Path = 'Source\Core\Common\Random.cpp'; Pattern = 'Deliberately a never-deleted pointer' }
+        # Host-side only; the generated module never touches Common::Random.
+        ClearsModuleCache = $false
+        Why     = 'stop the thread_local PRNG destructor faulting in mbedtls at thread detach (silent shutdown 0xC0000005)'
     }
 )
 

@@ -1,0 +1,36 @@
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -752,10 +752,32 @@
+   m_impl->state_hook = {};
+   if (m_impl->controllers_initialized)
+     UICommon::ShutdownControllers();
++
++  // Destroy the render window BEFORE UICommon::Shutdown().
++  //
++  // UICommon::Shutdown() calls Config::Shutdown(), which clears every config
++  // layer. ~PlatformWin32() then calls DestroyWindow(), and Windows dispatches
++  // WM_KILLFOCUS to the window procedure synchronously from inside that call.
++  // PlatformWin32's WM_KILLFOCUS handler does
++  //     Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);
++  // and Config::Set() dereferences GetLayer() with no null check, so with the
++  // layers already cleared the window's own destruction faulted:
++  //     0xC0000005 reading 0x20 in Config::Layer::Set, reached from
++  //     ~Runtime -> ~PlatformWin32 -> WndProc -> Config::Set<float>.
++  //
++  // Nothing here outlives the window, so tearing it down first restores plain
++  // reverse-of-construction order and the handler runs against a live config.
++  // s_platform is cleared first so host callbacks cannot reach a dying
++  // platform while its remaining messages are still being dispatched.
++  {
++    std::lock_guard platform_lock(s_runtime_mutex);
++    s_platform = nullptr;
++  }
++  m_impl->platform.reset();
++
+   if (m_impl->ui_initialized)
+     UICommon::Shutdown();
+   std::lock_guard lock(s_runtime_mutex);
+-  s_platform = nullptr;
+   s_window_title.clear();
+   s_show_fps_in_title = true;
+   s_runtime_active = false;

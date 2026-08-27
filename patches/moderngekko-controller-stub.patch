@@ -1,0 +1,21 @@
+diff --git a/tools/frontend_config.cpp b/tools/frontend_config.cpp
+index 1b1e308..0c16c0b 100644
+--- a/tools/frontend_config.cpp
++++ b/tools/frontend_config.cpp
+@@ -337,7 +337,15 @@ ReadConfiguredControllers(const fs::path &user_directory) {
+ 
+ bool ControllerConfigExists(const fs::path &user_directory) {
+   std::error_code ec;
+-  return fs::is_regular_file(ControllerConfigPath(user_directory), ec);
++  if (!fs::is_regular_file(ControllerConfigPath(user_directory), ec))
++    return false;
++  // Dolphin's config system creates the profile as an empty stub on startup,
++  // alongside FreeLook.ini, GCKeyNew.ini and friends. A bare existence test
++  // therefore reports "configured" for a 0-byte file, and the caller then
++  // refuses to launch with "has no configured controller device" -- while the
++  // code that would WRITE a profile is only reached when the file is absent.
++  // Treat a profile with no usable device as not existing, so it gets written.
++  return !ReadConfiguredControllers(user_directory).empty();
+ }
+ 
+ bool GenerateControllerConfig(const fs::path &user_directory,
