@@ -1,43 +1,91 @@
 /*
  * chain-test -- prove the ModernGekko mod chain end to end, changing nothing.
  *
- * This mod deliberately has no gameplay effect. It exists to answer one
- * question that had never been tested on this game: does a mod get discovered,
- * accepted by the ABI check, and actually dispatched to?
- *
- * It registers entry hooks only. A hook is purely observational by design --
- * ModManager::Dispatch saves the CPUState, calls the hook, then restores it
- * (mod_loader.cpp), and with no patch registered for the address it returns
- * false so the original function still runs. So these hooks cannot alter
- * behaviour even by accident.
+ * This mod deliberately has no gameplay effect. It registers entry hooks only.
+ * A hook is purely observational by design: ModManager::Dispatch saves the
+ * CPUState, calls the hook, then restores it, and with no patch registered for
+ * the address it returns false so the original function still runs.
  *
  * Addresses come from tools/find_functions.py, which recovers call targets by
- * decoding every `bl` in main.dol. That matters: DolRecomp turns a `bl` into
- * `ctx->pc = <target>; return;`, handing control back to the block dispatcher,
- * which consults the mod manager. A `bl` target is therefore always reachable
- * by dispatch, whereas an arbitrary mid-function address is reached by a plain
- * `goto` inside a chunk and would never fire.
+ * decoding every `bl` in main.dol. DolRecomp compiles a `bl` as
+ * `ctx->pc = <target>; return;`, handing control to the block dispatcher, which
+ * consults the mod manager -- so a `bl` target is always reachable by dispatch,
+ * whereas a mid-function address is reached by a plain `goto` inside a chunk
+ * and would never fire.
  *
- *   0x80003140  the DOL entry point, executed exactly once at boot
+ *   0x80003140  the DOL entry point, executed once at boot
  *   0x80084110  90 static call sites
  *   0x80036AF8  86 static call sites
  *
- * Three targets rather than one so the result stays informative: if the two
- * ordinary functions fire but the entry point does not, that tells us the boot
- * path bypasses dispatch, which is worth knowing on its own.
+ * SECOND QUESTION: does a hook fire once per guest call?
+ *
+ * The first run reported the entry hook firing TWICE, which should be
+ * impossible for a once-executed entry point. Two dispatch paths retry with an
+ * aliased address when the first attempt is not "handled":
+ *
+ *   StaticRecompCore_Run.cpp:221   handled = host_call(pc);
+ *                                  if (!handled && pc < ram_size)
+ *                                      handled = host_call(pc | 0x80000000);
+ *   generated.h dolrecomp_call     same shape, via dolrecomp_physical_pc_alias
+ *
+ * and Dispatch returns false for a hook-only mod, because false is what tells
+ * the caller "no patch replaced this, run the original". So a hook can be
+ * re-entered on the alias retry.
+ *
+ * To distinguish a double dispatch of ONE call from TWO real calls, each hook
+ * records the guest link register and stack pointer.
+ *
+ * The entry point is the decisive case, and the reason it is hooked at all: it
+ * executes exactly once at boot, so two fires carrying an identical (lr, sp)
+ * pair can only be one call dispatched twice, and two fires with different lr
+ * mean the entry was genuinely re-entered.
+ *
+ * For the two ordinary functions the same test is only suggestive: a loop
+ * calling one of them repeatedly from a single call site also produces
+ * identical (lr, sp) pairs. Read their repeat counts as a ratio -- repeats at
+ * almost exactly half the fires would indicate every call is dispatched twice,
+ * whereas a small fraction is ordinary looping.
  */
 #define __USE_MINGW_ANSI_STDIO 1
 #include "moderngekko/mod_abi.h"
 
 #include <stdio.h>
 
-static unsigned long long g_entry_hits;
-static unsigned long long g_hits_a;
-static unsigned long long g_hits_b;
+typedef struct HookStats {
+    const char *label;
+    unsigned long long fires;
+    unsigned long long repeats;   /* fired again with an identical (lr, sp) */
+    unsigned long long first_lr;
+    unsigned long long second_lr;
+    uint32_t last_lr;
+    uint32_t last_sp;
+    int have_last;
+} HookStats;
 
-static void hook_entry(CPUState *state) { (void)state; ++g_entry_hits; }
-static void hook_a(CPUState *state)     { (void)state; ++g_hits_a; }
-static void hook_b(CPUState *state)     { (void)state; ++g_hits_b; }
+static HookStats g_entry = { "0x80003140" };
+static HookStats g_fn_a  = { "0x80084110" };
+static HookStats g_fn_b  = { "0x80036AF8" };
+
+static void record(HookStats *s, const CPUState *state)
+{
+    const uint32_t lr = state->lr;
+    const uint32_t sp = state->gpr[1];
+
+    if (s->fires == 0) s->first_lr = lr;
+    else if (s->fires == 1) s->second_lr = lr;
+
+    if (s->have_last && lr == s->last_lr && sp == s->last_sp)
+        ++s->repeats;
+
+    s->last_lr = lr;
+    s->last_sp = sp;
+    s->have_last = 1;
+    ++s->fires;
+}
+
+static void hook_entry(CPUState *state) { record(&g_entry, state); }
+static void hook_a(CPUState *state)     { record(&g_fn_a,  state); }
+static void hook_b(CPUState *state)     { record(&g_fn_b,  state); }
 
 static const ModernGekkoModHook hooks[] = {
     RECOMP_HOOK(0x80003140u, hook_entry),
@@ -55,16 +103,36 @@ static void mod_loaded(const ModernGekkoModHostApi *api)
     fflush(stderr);
 }
 
+static void report(const HookStats *s)
+{
+    fprintf(stderr, "[chain-test]   %s  fires=%llu  same-(lr,sp) repeats=%llu",
+            s->label, s->fires, s->repeats);
+    if (s->fires >= 1) fprintf(stderr, "  first_lr=0x%08llX", s->first_lr);
+    if (s->fires >= 2) fprintf(stderr, "  second_lr=0x%08llX", s->second_lr);
+    fputc('\n', stderr);
+}
+
 static void mod_unloaded(void)
 {
-    fprintf(stderr,
-            "[chain-test] hooks fired: 0x80003140=%llu  0x80084110=%llu  0x80036AF8=%llu\n",
-            g_entry_hits, g_hits_a, g_hits_b);
-    fprintf(stderr,
-            "[chain-test] %s\n",
-            (g_entry_hits || g_hits_a || g_hits_b)
-                ? "DISPATCH WORKS -- mods can intercept this game"
-                : "NO HOOK FIRED -- discovery and ABI are fine but dispatch never reached these addresses");
+    const unsigned long long total =
+        g_entry.fires + g_fn_a.fires + g_fn_b.fires;
+    const unsigned long long repeats =
+        g_entry.repeats + g_fn_a.repeats + g_fn_b.repeats;
+
+    fprintf(stderr, "[chain-test] results:\n");
+    report(&g_entry);
+    report(&g_fn_a);
+    report(&g_fn_b);
+
+    if (total == 0) {
+        fprintf(stderr, "[chain-test] NO HOOK FIRED -- dispatch never reached these addresses\n");
+    } else if (repeats == 0) {
+        fprintf(stderr, "[chain-test] VERDICT: no duplicate dispatch -- each fire is a distinct call\n");
+    } else {
+        fprintf(stderr,
+                "[chain-test] VERDICT: %llu of %llu fires are duplicate dispatches of the same call\n",
+                repeats, total);
+    }
     fflush(stderr);
 }
 

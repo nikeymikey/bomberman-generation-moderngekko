@@ -299,6 +299,40 @@ only *forced* fallback ranges go to the interpreter. So the unit of cost is
 **16 KB of guest code per hook**, and several hooks scattered across the
 address space cost far more than several hooks in one place.
 
+### A hook is not exactly-once
+
+`mods/chain-test` measured this rather than assuming it. The DOL entry point
+executes once at boot, yet:
+
+```
+[chain-test]   0x80003140  fires=2  same-(lr,sp) repeats=1  first_lr=0x00000000  second_lr=0x00000000
+```
+
+Identical `lr` and stack pointer, so that is one guest call dispatched to the
+hook twice. It is intermittent, not universal -- in the same run one of four
+fires on another address was a duplicate.
+
+The mechanism is the passthrough guard in the demoted-chunk path.
+`StaticRecompCore_Run.cpp:218` dispatches the host call, and because a
+hook-only mod returns `false` (that is the signal meaning "no patch replaced
+this, run the original") the core sets `m_host_call_passthrough` and hands the
+address to `Jit64`. `ShouldYieldAt` (`StaticRecompCore.cpp:129`) is supposed to
+consume that flag so the JIT runs straight through. It is a **single-shot flag
+with no stack**, and it is only consumed if the JIT actually consults it for
+that address -- a block compiled before the address became a host-call address
+will not. The flag then survives, and the next arrival at the same pc dispatches
+the hook again. Note that line 224 invalidates the block at `lr`, not at `pc`.
+
+**Consequence for mod authors: entry hooks must be idempotent.** Read guest
+state, drive an overlay, trigger an effect that is safe to repeat -- but do not
+count, accumulate, or advance a state machine in a hook without deduplicating
+on something that changes between real calls.
+
+By reasoning (not yet measured): a `RECOMP_PATCH` returns `true`, so
+`Run.cpp:226` charges cycles and continues the loop without ever entering the
+JIT passthrough path, which should make patches exactly-once. Treat that as
+unverified until a patch is actually instrumented.
+
 ### Hooks cannot change behaviour
 
 `ModManager::Dispatch` saves the CPUState, calls each entry hook, then restores
