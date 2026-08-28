@@ -1,0 +1,247 @@
+--- a/tools/moderngekko_launcher.cpp
++++ b/tools/moderngekko_launcher.cpp
+@@ -41,6 +41,10 @@
+ #define MODERNGEKKO_RUNNER_FILENAME "moderngekko-run"
+ #endif
+ 
++#ifndef MODERNGEKKO_PORT_FILENAME
++#define MODERNGEKKO_PORT_FILENAME "moderngekko-port"
++#endif
++
+ #ifndef MODERNGEKKO_USER_DIRECTORY_NAME
+ #define MODERNGEKKO_USER_DIRECTORY_NAME "moderngekko"
+ #endif
+@@ -499,6 +503,154 @@
+   const fs::path sibling = self.parent_path() / runner;
+   return fs::is_regular_file(sibling) ? sibling : runner;
+ }
++
++// ---- First-run module build -------------------------------------------------
++//
++// The recompiled module is derived from the game's own code and so cannot be
++// distributed: every user compiles it from the disc image they supply. That
++// makes the first launch a build, not a download, and the launcher has to drive
++// it because an end user has no reason to own a shell.
++//
++// The result goes to <user dir>/StaticRecompModules, the runner's fourth search
++// location, rather than beside the executable: a release unpacked into Program
++// Files is not writable, and the user directory always is.
++
++#if defined(MODERNGEKKO_REQUIRED_DISC_ID)
++#define MODERNGEKKO_MODULE_DISC_ID MODERNGEKKO_REQUIRED_DISC_ID
++#else
++#define MODERNGEKKO_MODULE_DISC_ID ""
++#endif
++
++std::string ModuleFileName()
++{
++  std::string name = std::string("g") + MODERNGEKKO_MODULE_DISC_ID + "_recomp";
++#if defined(_WIN32)
++  name += ".dll";
++#else
++  name += ".so";
++#endif
++  return name;
++}
++
++fs::path UserModulePath(const fs::path& user_directory)
++{
++  return user_directory / "StaticRecompModules" / ModuleFileName();
++}
++
++// True when the runner will find a module without help. Mirrors its search
++// order for the two locations a launcher can affect.
++bool ModuleReady(const fs::path& release_directory, const fs::path& user_directory)
++{
++  if (std::string(MODERNGEKKO_MODULE_DISC_ID).empty())
++    return true;  // unbranded build: leave module handling to the runner
++  std::error_code ec;
++  return fs::is_regular_file(release_directory / ModuleFileName(), ec) ||
++         fs::is_regular_file(UserModulePath(user_directory), ec);
++}
++
++// A bundled toolchain is prepended to PATH rather than passed to
++// moderngekko-port, which looks the compiler up by bare name. Prepended, not
++// appended, so the shipped compiler wins over whatever a developer machine
++// happens to have -- the build must be reproducible for the recipient.
++void UseBundledToolchain(const fs::path& release_directory)
++{
++  std::error_code ec;
++  const fs::path bin = release_directory / "toolchain" / "bin";
++  if (!fs::is_directory(bin, ec))
++    return;
++  const char* existing = SDL_getenv("PATH");
++  std::string value = bin.string();
++  if (existing && *existing)
++  {
++#if defined(_WIN32)
++    value += ";";
++#else
++    value += ":";
++#endif
++    value += existing;
++  }
++  SDL_setenv_unsafe("PATH", value.c_str(), 1);
++}
++
++bool BuildModule(const fs::path& game_root, const fs::path& release_directory,
++                 const fs::path& user_directory, ExtractionState* state)
++{
++  auto fail = [&](std::string message)
++  {
++    std::lock_guard lock(state->mutex);
++    state->error = std::move(message);
++    state->running = false;
++    return false;
++  };
++
++  {
++    std::lock_guard lock(state->mutex);
++    state->status = "Compiling the game for your computer. This happens once and "
++                    "takes several minutes.";
++    state->error.clear();
++  }
++
++  fs::path port = MODERNGEKKO_PORT_FILENAME;
++#if defined(_WIN32)
++  port += ".exe";
++#endif
++  const fs::path port_path = release_directory / port;
++  std::error_code ec;
++  if (!fs::is_regular_file(port_path, ec))
++    return fail("Missing " + port_path.filename().string() + " next to the launcher.");
++
++  const fs::path output = user_directory / "Modules";
++  fs::create_directories(output, ec);
++
++  const std::array<std::string, 7> storage = {
++      port_path.string(), "build", game_root.string(), "--backend", "c", "--output",
++      output.string()};
++  std::array<const char*, 8> arguments{};
++  for (std::size_t i = 0; i < storage.size(); ++i)
++    arguments[i] = storage[i].c_str();
++
++  SDL_Process* process = SDL_CreateProcess(arguments.data(), false);
++  if (!process)
++    return fail("Could not start the compiler: " + std::string(SDL_GetError()));
++  int exit_code = 1;
++  const bool waited = SDL_WaitProcess(process, true, &exit_code);
++  SDL_DestroyProcess(process);
++  if (!waited || exit_code != 0)
++  {
++    return fail("Compiling failed. A C compiler is required: either use a release "
++                "with a bundled toolchain, or install MinGW-w64 GCC and put it on PATH.");
++  }
++
++  // Verify rather than trust the exit code, then move the result where the
++  // runner looks. moderngekko-port keys its cache on the DOL hash, so the
++  // module is nested under a directory named for it.
++  fs::path built;
++  for (fs::recursive_directory_iterator it(output, ec), end; !ec && it != end; it.increment(ec))
++  {
++    if (it->is_regular_file(ec) && it->path().filename() == ModuleFileName())
++    {
++      if (built.empty() ||
++          fs::last_write_time(it->path(), ec) > fs::last_write_time(built, ec))
++        built = it->path();
++    }
++  }
++  if (built.empty())
++    return fail("The compiler reported success but produced no " + ModuleFileName() + ".");
++
++  const fs::path destination = UserModulePath(user_directory);
++  fs::create_directories(destination.parent_path(), ec);
++  fs::copy_file(built, destination, fs::copy_options::overwrite_existing, ec);
++  if (ec)
++    return fail("Could not install the compiled module: " + ec.message());
++
++  {
++    std::lock_guard lock(state->mutex);
++    state->status = "Ready to play";
++    state->finished_game = game_root;
++  }
++  state->running = false;
++  return true;
++}
+ // ---- Mods ------------------------------------------------------------------
+ //
+ // A .mgm package is a DIRECTORY whose name is the mod ID and which contains
+@@ -925,6 +1077,10 @@
+   refresh_controllers();
+   ExtractionState extraction;
+   std::jthread extraction_thread;
++  ExtractionState build_state;
++  std::jthread build_thread;
++  // Do this once, before anything spawns moderngekko-port.
++  UseBundledToolchain(release_directory);
+   enum class LaunchMode
+   {
+     None,
+@@ -1027,14 +1183,34 @@
+         ImGui::TextDisabled("Solo play only.");
+         ImGui::Spacing();
+       }
+-      if (ImGui::Button("Play", ImVec2(180 * scale, 42 * scale)))
++      const bool module_ready = ModuleReady(release_directory, user_directory);
++      const bool building = build_state.running.load();
++      ImGui::BeginDisabled(building);
++      if (ImGui::Button(module_ready ? "Play" : "Build and Play",
++                        ImVec2(180 * scale, 42 * scale)))
+       {
+         if (ensure_controller())
+         {
+-          launch_mode = LaunchMode::Solo;
+-          done = true;
++          if (module_ready)
++          {
++            launch_mode = LaunchMode::Solo;
++            done = true;
++          }
++          else
++          {
++            // Compile first. The game cannot start without a module, and the
++            // module cannot ship, so this is the one unavoidable wait.
++            build_state.running = true;
++            const fs::path game = current_game;
++            build_thread = std::jthread(
++                [game, release_directory, user_directory, &build_state]
++                { BuildModule(game, release_directory, user_directory, &build_state); });
++          }
+         }
+       }
++      ImGui::EndDisabled();
++      if (!module_ready && !building)
++        ImGui::TextDisabled("First run: the game is compiled from your disc image.");
+       ImGui::SameLine();
+       if (ImGui::Button("Host Netplay", ImVec2(180 * scale, 42 * scale)))
+       {
+@@ -1381,6 +1557,20 @@
+       if (!extraction.error.empty())
+         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", extraction.error.c_str());
+     }
++    if (build_state.running.load())
++    {
++      // Indeterminate: moderngekko-port reports nothing this process can read
++      // without piping its output, and a fake percentage would be a lie.
++      ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-1, 0),
++                         "Compiling");
++    }
++    {
++      std::lock_guard lock(build_state.mutex);
++      if (!build_state.status.empty())
++        ImGui::TextWrapped("%s", build_state.status.c_str());
++      if (!build_state.error.empty())
++        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "%s", build_state.error.c_str());
++    }
+     {
+       std::lock_guard lock(dialog.mutex);
+       if (!dialog.error.empty())
+@@ -1401,6 +1591,8 @@
+ 
+   if (extraction_thread.joinable())
+     extraction_thread.join();
++  if (build_thread.joinable())
++    build_thread.join();
+ 
+   int result = 0;
+   if (launch_mode != LaunchMode::None)

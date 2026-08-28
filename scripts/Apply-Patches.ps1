@@ -119,6 +119,15 @@ $patches = @(
         # Frontend, launcher and runner only; the generated module is untouched.
         ClearsModuleCache = $false
         Why     = 'per-mod settings: declared in mod.ini, chosen in the launcher, stored in config.ini, delivered as environment variables'
+    },
+    @{
+        Name    = 'moderngekko-first-run-build'
+        File    = 'moderngekko-first-run-build.patch'
+        Repo    = 'lib\\ModernGekko'
+        Marker  = @{ Path = 'tools\\moderngekko_launcher.cpp'; Pattern = 'First-run module build' }
+        # Launcher only.
+        ClearsModuleCache = $false
+        Why     = 'launcher compiles the module from the user''s own disc image on first run, so a release never ships recompiled game code'
     }
 )
 

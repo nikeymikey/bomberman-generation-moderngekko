@@ -470,7 +470,8 @@ and `--no-mods` suppresses only the two defaults.
 ## Branded launcher and the shipping layout
 
 `Build-Tools.ps1 -WithLauncher` builds the ImGui/SDL3 launcher, which browses
-for an ISO, extracts it and plays. Two options make it work for one game:
+for an ISO, extracts it, compiles it on first run, and plays. Two options make
+it work for one game:
 
 * `-DiscId GBGE5G` — **required**. `PrepareDisc()` has its only accept path
   inside `#ifdef MODERNGEKKO_REQUIRED_DISC_ID`; without it every disc is
@@ -479,25 +480,73 @@ for an ISO, extracts it and plays. Two options make it work for one game:
 * `-PortableUserDir` — keeps config, saves and logs in `User\` beside the
   executable instead of `%LOCALAPPDATA%\moderngekko`.
 
-The launcher does **not** pass `--module`, so the runner falls back to its own
-search order:
+### What may not ship
 
-1. `--module <path>` (what `moderngekko-port` uses)
-2. `$env:STATICRECOMP_MODULE`
-3. `<exe dir>\g<DISCID>_recomp.dll`  ← the shipping layout
-4. `<user dir>\StaticRecompModules\g<DISCID>_recomp.dll`
+**The recompiled module cannot be distributed.** `g<DISCID>_recomp.dll` is the
+game's own code translated to another language; distributing it distributes the
+game. Every recipient compiles it from the disc image they supply.
 
-Without one of these it fails with "no native module was supplied".
-`Install-Module.ps1` puts the built module at option 3. A distributable folder
-therefore looks like:
+This is not a licensing footnote, it is the constraint the whole release design
+follows from. An earlier version of this section listed the module in the
+distributable folder while the Licence section said it could not be
+distributed; both cannot be true.
+
+### The distributable folder
 
 ```
 ModernGekko.exe          launcher
 moderngekko-run.exe      runner
-gGBGE5G_recomp.dll       the recompiled game
+moderngekko-port.exe     drives the first-run build
+dolrecomp.exe            the recompiler
 Mods/                    loaded from beside the executable
-User/                    config, saves, logs (portable build)
+toolchain/               optional bundled MinGW-w64
+README.txt  LICENSE  manifest.txt
 ```
+
+`Build-Release.ps1` assembles it and then **scans the finished folder** for
+anything game-derived — `g*_recomp.*`, `.dol`, `.iso`, `.rvz`, `.wbfs`, `.gcm`
+— deleting the whole output and failing if it finds any. The scan exists
+because `g<DISCID>_recomp.dll` sits directly beside the executables in the build
+directory, so a slightly-too-broad copy ships the game. Trusting the copy list
+is not the same as checking the result.
+
+Dolphin's `Sys` directory is deliberately absent. `CreateSysDirectoryPath()`
+looks for `Sys\` beside the executable on Windows; there is none, and the game
+runs regardless, so shipping one would be cargo cult.
+
+### First run
+
+The launcher compiles the module itself (`moderngekko-first-run-build.patch`).
+`ModuleReady()` mirrors the runner's search order, and while no module exists
+the Play button reads **Build and Play**. The build output goes to
+`<user dir>/StaticRecompModules/`, the runner's fourth search location, rather
+than beside the executable: a release unpacked into Program Files is not
+writable, and the user directory always is.
+
+A bundled `toolchain/bin` is **prepended** to `PATH` before spawning
+`moderngekko-port`, which resolves the compiler by bare name. Prepended rather
+than appended so the shipped compiler wins over whatever the machine already
+has, which is what makes the recipient's build reproducible.
+
+Progress is indeterminate on purpose: `moderngekko-port` reports nothing the
+launcher can read without piping its output, and an invented percentage would
+be a lie.
+
+### Runner module search order
+
+1. `--module <path>` (what `moderngekko-port` uses)
+2. `$env:STATICRECOMP_MODULE`
+3. `<exe dir>\g<DISCID>_recomp.dll` — a developer build, never a release
+4. `<user dir>\StaticRecompModules\g<DISCID>_recomp.dll` — the first-run build
+
+Without one of these it fails with "no native module was supplied".
+
+### Distributing binaries
+
+These binaries are built from GPL sources (ModernGekko and DolRecomp are
+GPL-3.0-or-later; Dolphin underneath is GPL-2.0-or-later). Distributing them
+carries an obligation to offer the corresponding source to recipients, which
+means the repository has to be reachable at the tagged commit.
 
 ## Toolchain: Ninja + MinGW GCC
 
