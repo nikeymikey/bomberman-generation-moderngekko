@@ -34,6 +34,12 @@ param(
     [Parameter(HelpMessage = 'Mods to include, by .mgm directory name.')]
     [string[]] $Mods = @('starting_bombs.mgm'),
 
+    [Parameter(HelpMessage = 'MinGW bin directory to take runtime DLLs from (libgcc, libstdc++, libwinpthread). Defaults to <ToolchainPath>\bin when that is given.')]
+    [string] $RuntimeDllDir = '',
+
+    [Parameter(HelpMessage = 'Also produce a .zip for upload. The folder is stored inside it under its own name.')]
+    [string] $ZipPath = '',
+
     [Parameter(HelpMessage = 'Delete the output folder first.')]
     [switch] $Fresh
 )
@@ -106,6 +112,57 @@ if (-not [string]::IsNullOrWhiteSpace($ToolchainPath)) {
     Write-Host 'No -ToolchainPath: recipients will need their own MinGW-w64 GCC on PATH.' -ForegroundColor Yellow
 }
 
+# ---- runtime DLLs -----------------------------------------------------------
+# MinGW builds link against libgcc/libstdc++/libwinpthread, which live in the
+# compiler's bin directory -- on a developer's PATH, and on nobody else's. The
+# absence of DLLs beside the executables says nothing about what they import,
+# which is why this is measured rather than assumed.
+$checker = Join-Path $RepoRoot 'tools\check_imports.py'
+if (-not (Test-Path $checker)) { throw "check_imports.py not found: $checker" }
+if ([string]::IsNullOrWhiteSpace($RuntimeDllDir) -and -not [string]::IsNullOrWhiteSpace($ToolchainPath)) {
+    $RuntimeDllDir = Join-Path $ToolchainPath 'bin'
+}
+# `where.exe gcc` prints the executable, not the folder, and that is the obvious
+# thing to paste here. Accept it rather than making the user edit the path.
+if (-not [string]::IsNullOrWhiteSpace($RuntimeDllDir)) {
+    if (Test-Path -LiteralPath $RuntimeDllDir -PathType Leaf) {
+        $RuntimeDllDir = Split-Path -Parent $RuntimeDllDir
+        Write-Host ("Using the containing folder: {0}" -f $RuntimeDllDir) -ForegroundColor DarkGray
+    }
+    if (-not (Test-Path -LiteralPath $RuntimeDllDir -PathType Container)) {
+        throw "-RuntimeDllDir is not a directory: $RuntimeDllDir"
+    }
+}
+
+$missing = @(Invoke-Native -FilePath 'python' -ArgumentList @($checker, $OutputDir, '--list-missing') -Quiet |
+             ForEach-Object { $_.Text } | Out-String) -split "`r?`n" | Where-Object { $_.Trim() }
+if ($missing.Count -gt 0) {
+    Write-Host ''
+    Write-Host ("Executables need {0} runtime DLL(s) not in the release:" -f $missing.Count) -ForegroundColor Yellow
+    foreach ($dll in $missing) { Write-Host ("  {0}" -f $dll.Trim()) -ForegroundColor Yellow }
+    if ([string]::IsNullOrWhiteSpace($RuntimeDllDir)) {
+        throw ("The release is not self-contained and would fail on any machine without a compiler installed. " +
+               "Pass -RuntimeDllDir pointing at your MinGW bin directory (or -ToolchainPath, which implies it).")
+    }
+    foreach ($dll in $missing) {
+        $name = $dll.Trim()
+        $source = Join-Path $RuntimeDllDir $name
+        if (-not (Test-Path $source)) { throw "$name is required but not in $RuntimeDllDir" }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $OutputDir $name) -Force
+        Write-Host ("  copied {0}" -f $name) -ForegroundColor DarkGray
+    }
+}
+
+# Re-check rather than assume the copies were sufficient: a runtime DLL can
+# itself import another one.
+$verify = Invoke-Native -FilePath 'python' -ArgumentList @($checker, $OutputDir) -Quiet
+if (-not $verify.Success) {
+    Write-Host ''
+    Write-Host $verify.Text -ForegroundColor Red
+    throw 'The release is still not self-contained. It would fail on a machine without a compiler.'
+}
+Write-Host '  verified: self-contained, every non-system import present' -ForegroundColor Green
+
 # ---- the check that matters -------------------------------------------------
 # Recompiled game code must never leave this machine. Scan the finished folder
 # rather than trusting the copy list above.
@@ -148,6 +205,48 @@ if ($toolchainFiles.Count -gt 0) {
 }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllLines((Join-Path $OutputDir 'manifest.txt'), $lines, $utf8NoBom)
+
+# ---- archive -----------------------------------------------------------------
+if (-not [string]::IsNullOrWhiteSpace($ZipPath)) {
+    $zipDir = Split-Path -Parent $ZipPath
+    if ($zipDir -and -not (Test-Path $zipDir)) { New-Item -ItemType Directory -Force -Path $zipDir | Out-Null }
+    if (Test-Path $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force }
+
+    Write-Host ''
+    Write-Host 'Compressing...' -ForegroundColor Cyan
+    # -Path the folder itself, not its contents: extracting should produce one
+    # named folder rather than scattering 8 files into someone's Downloads.
+    Compress-Archive -Path $OutputDir -DestinationPath $ZipPath -CompressionLevel Optimal
+    if (-not (Test-Path $ZipPath)) { throw "Compress-Archive reported success but $ZipPath does not exist." }
+
+    # The last gate before anything is uploaded. The folder was scanned above,
+    # but this is the artefact that actually leaves the machine, so check the
+    # thing itself rather than the thing it was made from.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $bad = @($archive.Entries | Where-Object {
+            $leaf = $_.Name
+            $ext = [System.IO.Path]::GetExtension($leaf)
+            $leaf -like 'g*_recomp.*' -or @('.dol', '.iso', '.rvz', '.wbfs', '.gcm') -contains $ext
+        })
+    } finally {
+        $archive.Dispose()
+    }
+    if ($bad.Count -gt 0) {
+        foreach ($entry in $bad) { Write-Host ("  {0}" -f $entry.FullName) -ForegroundColor Red }
+        Remove-Item -LiteralPath $ZipPath -Force
+        throw "Game-derived files are inside the archive. Zip deleted. Nothing above may be distributed."
+    }
+
+    $zipItem = Get-Item -LiteralPath $ZipPath
+    $zipHash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLower()
+    Write-Host ''
+    Write-Host ("Archive: {0}" -f $ZipPath) -ForegroundColor Green
+    Write-Host ("  {0:N1} MB" -f ($zipItem.Length / 1MB))
+    Write-Host ("  sha256 {0}" -f $zipHash)
+    Write-Host '  verified: archive contains no game-derived files' -ForegroundColor Green
+}
 
 Write-Host ''
 Write-Host ("Release assembled: {0}" -f $OutputDir) -ForegroundColor Green

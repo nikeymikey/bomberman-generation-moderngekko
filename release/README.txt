@@ -7,6 +7,11 @@ translated to C and compiled for your CPU.
 
 You must supply your own disc image. None is included, and none will be.
 
+This folder was assembled by scripts/Build-Release.ps1 from a source build. It
+is not published as a download: the executables are unsigned, and Windows Smart
+App Control blocks unsigned applications outright. Running unsigned binaries
+someone sent you is your decision to make knowingly.
+
 
 WHAT YOU NEED
 -------------
@@ -32,9 +37,9 @@ Nintendo's binary and cannot legally be distributed. Everyone compiles it from
 the disc image they own. That is also why this download does not contain
 anything that would let it run without your disc image.
 
-If the build fails saying a C compiler is required, you have the release
-without the bundled toolchain. Either download the release that includes it, or
-install MinGW-w64 GCC and make sure gcc is on your PATH.
+If the build fails saying a C compiler is required, this folder was assembled
+without a bundled toolchain. Install MinGW-w64 GCC and make sure gcc is on your
+PATH, or re-assemble with -ToolchainPath.
 
 
 SETTINGS
@@ -93,5 +98,5 @@ LICENCE
 GPL-3.0-or-later. Built on ModernGekko and DolRecomp by ExpansionPak, which are
 in turn built on the Dolphin emulator (GPL-2.0-or-later). See LICENSE.
 
-Source, and the corresponding source for these binaries, is linked from the
-release page. No game code or assets are included in this download.
+The repository these binaries were built from is the corresponding source for
+them. No game code or assets are included here.
