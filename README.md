@@ -386,6 +386,79 @@ initialisers, and doing that merely to render a label would execute a mod's code
 before the user has enabled anything. A package with no `mod.ini` is listed
 under its directory name.
 
+### A worked example: mods/starting-bombs
+
+Every player starts a match with a chosen number of bombs, selectable in the
+launcher. The method matters more than the mod, and two wrong turns along the
+way are the most useful part of it.
+
+**Find the value.** Dolphin cheat search (Tools -> Cheats Manager) narrowed to
+the live bomb capacity by filtering on 1, then 2 after a powerup. Capacity, not
+bombs-available: it rises on a powerup and does not drop when a bomb is placed.
+
+**Find the code.** A memory write breakpoint on that address broke on the
+store. The cheat-search address was a *byte* inside a big-endian 32-bit field,
+so it was not 4-byte aligned -- `tools/whereis.py` rejects such addresses
+instead of pretending to locate them.
+
+**Confirm it statically**, because the debugger view is not the source of
+truth. Read straight out of `main.dol`:
+
+```
+800B5D00  9421FFF0  stwu r1, -16(r1)     fn_800B5D00 entry
+800B5D04  80030064  lwz  r0, 0x64(r3)
+800B5D08  2C000001  cmpwi r0, 1
+800B5D0C  408202F4  bne  +0x2F4
+800B5D1C  38E00001  li   r7, 1           base bomb count
+800B5D30  90E30184  stw  r7, 0x184(r3)
+```
+
+Nothing writes `r3` between the entry and the store, so `r3` on entry is the
+pointer the store uses. That is the fact the mod rests on.
+
+**First wrong turn: assuming it was an init routine.** It is not.
+Instrumenting it showed the gate at `+0x64` true on *every* call, and the
+function holds eight stores to `+0x184`: a bomb-up doing `capacity += 1` at
+`800B5DEC`, a clamp to 8 at `800B5F08`, and resets to 1 and 0. It *recomputes*
+`capacity = 1 + powerups` from scratch, constantly.
+
+**Second wrong turn: setting instead of adding.** The first version wrote 2
+whenever the field read 1. That is a floor, not a starting value -- after one
+bomb-up the game computes `1+1 = 2`, the mod saw 2 rather than 1 and did
+nothing, so the first powerup appeared to do nothing. Adding turns `1+N` into
+`2+N`, which is what changing the base constant would do. Only the exit counters
+(`applied 6629, gate-skipped 0, value-skipped 3147`) exposed this; the mod
+looked correct at match start either way.
+
+**Why not patch the DOL.** Changing `li r7, 1` to `li r7, 2` is a one-word DOL
+patch and was built and tested (`tools/apply_dol_patch.py`). It was rejected:
+the DOL's SHA-256 is the module cache key, so every combination of patches
+would need its own prebuilt module. DOL patches cannot coexist with toggleable
+mods on a shipped module.
+
+**The mod.** Two hooks on the same function. `RECOMP_HOOK` at entry records
+`r3` and nothing else, because the function computes the value afterwards;
+`RECOMP_HOOK_RETURN` runs after it finishes and does the write. Registers are
+restored after a hook, memory is not -- that asymmetry is why a hook-only mod
+can change anything. The entry/return flag also absorbs duplicate dispatch,
+which matters for an add: without it, a repeated return would add twice. A
+capacity of 0 is left alone so a curse still strips bombs, and the result is
+clamped to the same maximum of 8 the game uses.
+
+Verified in a four-player Battle match at every setting from 2 to 8, with
+powerups still incrementing beyond the chosen start.
+
+**Battle-only, tested rather than assumed.** `fn_800B5D00` is the general
+item/stat path, so there was every reason to expect it to run in story mode as
+well. It was checked with the mod enabled: story mode bomb counts are
+unchanged. The name claims Battle because that was measured, not because the
+function looked like it belonged to Battle.
+
+The scope was left out of the name until that test existed. If it had turned
+out otherwise, the gate was already identified -- a global at `0x80306BB0`,
+compared against 3 and 5 inside this same function -- and the mod would have
+read it rather than being renamed to hide the problem.
+
 ### Packaging
 
 A `.mgm` package is a *directory* named `<mod-id>.mgm` containing the platform

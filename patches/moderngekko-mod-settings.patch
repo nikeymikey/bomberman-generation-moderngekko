@@ -1,0 +1,301 @@
+--- a/tools/frontend_config.hpp
++++ b/tools/frontend_config.hpp
+@@ -5,6 +5,7 @@
+ #include <span>
+ #include <string>
+ #include <string_view>
++#include <utility>
+ #include <vector>
+ 
+ namespace moderngekko::frontend {
+@@ -34,6 +35,11 @@
+   // discovered, so upgrading an existing config never silently disables mods.
+   std::vector<std::string> mods;
+   bool mods_configured = false;
++  // Per-mod settings, keyed "<mod-id>.<setting-key>" in lower case, declared by
++  // "setting=" lines in a package's mod.ini. Held as opaque strings: the
++  // frontend stores and forwards them without needing to know what any of them
++  // mean, so a new mod needs no frontend change.
++  std::vector<std::pair<std::string, std::string>> mod_settings;
+   std::string netplay_nickname = "Player";
+   std::string netplay_address = "127.0.0.1";
+   std::uint16_t netplay_port = 2626;
+--- a/tools/frontend_config.cpp
++++ b/tools/frontend_config.cpp
+@@ -159,6 +159,18 @@
+           break;
+         start = comma + 1;
+       }
++    } else if (key.starts_with("mod.") && key.size() > 4) {
++      const std::string name = key.substr(4);
++      bool replaced = false;
++      for (auto &entry : config.mod_settings) {
++        if (entry.first == name) {
++          entry.second = raw_value;
++          replaced = true;
++          break;
++        }
++      }
++      if (!replaced)
++        config.mod_settings.emplace_back(name, raw_value);
+     } else if (key == "nickname")
+       config.netplay_nickname = raw_value;
+     else if (key == "address")
+@@ -304,6 +316,18 @@
+     }
+     file << '\n';
+   }
++  if (!config.mod_settings.empty()) {
++    file << "[ModSettings]\n";
++    for (const auto &entry : config.mod_settings) {
++      if (entry.first.find_first_of("\r\n=") != std::string::npos ||
++          entry.second.find_first_of("\r\n") != std::string::npos) {
++        if (error)
++          *error = "mod setting cannot contain a newline or '='";
++        return false;
++      }
++      file << "mod." << entry.first << '=' << entry.second << '\n';
++    }
++  }
+   file << "[Netplay]\n"
+        << "nickname=" << config.netplay_nickname << '\n'
+        << "address=" << config.netplay_address << '\n'
+--- a/tools/moderngekko_run.cpp
++++ b/tools/moderngekko_run.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "Common/StringUtil.h"
+ 
++#include <cctype>
+ #include <charconv>
+ #include <chrono>
+ #include <csignal>
+@@ -283,6 +284,25 @@
+     }
+   }
+ 
++  // Mod settings reach a mod as environment variables. The mod ABI has no
++  // settings channel, and a mod library cannot reliably locate config.ini from
++  // inside the runner process -- but the runner has both, so it translates.
++  // The name is MGMOD_<MOD-ID>_<KEY> with every non-alphanumeric folded to '_'
++  // and the whole thing upper-cased; a mod derives the same name from its own
++  // id and setting key, so neither side needs a shared table.
++  for (const auto &setting : frontend_config.mod_settings) {
++    std::string variable = "MGMOD_";
++    for (const char character : setting.first) {
++      const unsigned char raw = static_cast<unsigned char>(character);
++      variable += std::isalnum(raw) ? static_cast<char>(std::toupper(raw)) : '_';
++    }
++#if defined(_WIN32)
++    _putenv_s(variable.c_str(), setting.second.c_str());
++#else
++    setenv(variable.c_str(), setting.second.c_str(), 1);
++#endif
++  }
++
+   if (!netplay_role && !frontend_config.controller.empty()) {
+     std::string controller_message;
+     if (!moderngekko::frontend::EnsureControllerConfig(
+--- a/tools/moderngekko_launcher.cpp
++++ b/tools/moderngekko_launcher.cpp
+@@ -16,6 +16,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <cctype>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <filesystem>
+@@ -509,14 +510,73 @@
+ // its DllMain and static initialisers, and doing that merely to render a label
+ // would run a mod's code before the user has enabled anything. A mod without a
+ // mod.ini simply shows its ID.
++// One setting a mod declares in its mod.ini, as
++//   setting=<key>|<label>|<choice,choice,...>|<default>
++// A fixed choice list rather than free text: the launcher can then present it
++// without knowing anything about the mod, and cannot offer a value the mod
++// never said it accepts.
++struct ModSetting
++{
++  std::string key;
++  std::string label;
++  std::vector<std::string> choices;
++  std::string value;
++};
++
+ struct ModPackage
+ {
+   std::string directory;
++  std::string id;
+   std::string display_name;
+   std::string version;
++  std::vector<ModSetting> settings;
+   bool enabled = true;
+ };
+ 
++std::string ModLower(std::string text)
++{
++  for (char& character : text)
++    character = static_cast<char>(
++        std::tolower(static_cast<unsigned char>(character)));
++  return text;
++}
++
++std::vector<std::string> ModSplit(const std::string& text, char separator)
++{
++  std::vector<std::string> parts;
++  std::size_t start = 0;
++  while (true)
++  {
++    const std::size_t at = text.find(separator, start);
++    parts.push_back(text.substr(start, at == std::string::npos ? std::string::npos : at - start));
++    if (at == std::string::npos)
++      break;
++    start = at + 1;
++  }
++  return parts;
++}
++
++// Settings live in the frontend config keyed "<mod-id>.<key>", so one mod's
++// setting can never collide with another's.
++std::string ModSettingName(const ModPackage& package, const ModSetting& setting)
++{
++  return ModLower(package.id) + "." + ModLower(setting.key);
++}
++
++void SetModSetting(moderngekko::frontend::ConfigResult& config, const std::string& name,
++                   const std::string& value)
++{
++  for (auto& entry : config.mod_settings)
++  {
++    if (entry.first == name)
++    {
++      entry.second = value;
++      return;
++    }
++  }
++  config.mod_settings.emplace_back(name, value);
++}
++
+ std::string ModTrim(const std::string& text)
+ {
+   const std::size_t first = text.find_first_not_of(" \t");
+@@ -544,8 +604,36 @@
+     const std::string value = ModTrim(trimmed.substr(separator + 1));
+     if (key == "name" && !value.empty())
+       out->display_name = value;
++    else if (key == "id" && !value.empty())
++      out->id = value;
+     else if (key == "version" && !value.empty())
+       out->version = value;
++    else if (key == "setting")
++    {
++      const std::vector<std::string> fields = ModSplit(value, '|');
++      if (fields.size() < 4)
++        continue;
++      ModSetting setting;
++      setting.key = ModTrim(fields[0]);
++      setting.label = ModTrim(fields[1]);
++      setting.value = ModTrim(fields[3]);
++      for (const std::string& choice : ModSplit(fields[2], ','))
++      {
++        const std::string trimmed = ModTrim(choice);
++        if (!trimmed.empty())
++          setting.choices.push_back(trimmed);
++      }
++      if (setting.key.empty() || setting.choices.empty())
++        continue;
++      if (setting.label.empty())
++        setting.label = setting.key;
++      // A default the mod does not list is a mod bug; fall back to the first
++      // choice rather than presenting a value it never offered.
++      if (std::find(setting.choices.begin(), setting.choices.end(), setting.value) ==
++          setting.choices.end())
++        setting.value = setting.choices.front();
++      out->settings.push_back(std::move(setting));
++    }
+   }
+ }
+ 
+@@ -570,7 +658,8 @@
+         continue;
+       ModPackage package;
+       package.directory = name;
+-      package.display_name = it->path().stem().string();
++      package.id = it->path().stem().string();
++      package.display_name = package.id;
+       ReadModManifest(it->path(), &package);
+       packages.push_back(std::move(package));
+     }
+@@ -636,6 +725,26 @@
+       package.enabled = std::find(config.mods.begin(), config.mods.end(),
+                                   package.directory) != config.mods.end();
+   }
++  // Adopt any previously chosen setting values, ignoring ones the mod no longer
++  // offers -- a mod can drop or rename a choice between versions, and a stale
++  // config should not resurrect it.
++  for (ModPackage& package : mod_packages)
++  {
++    for (ModSetting& setting : package.settings)
++    {
++      const std::string name = ModSettingName(package, setting);
++      for (const auto& entry : config.mod_settings)
++      {
++        if (entry.first == name &&
++            std::find(setting.choices.begin(), setting.choices.end(), entry.second) !=
++                setting.choices.end())
++        {
++          setting.value = entry.second;
++          break;
++        }
++      }
++    }
++  }
+ 
+ #if defined(__linux__)
+   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, use_wayland ? "wayland" : "x11");
+@@ -1112,6 +1221,44 @@
+         }
+         if (ImGui::IsItemHovered())
+           ImGui::SetTooltip("%s", package.directory.c_str());
++
++        // Only while the mod is on: a control for something that is not running
++        // invites the reasonable assumption that it is.
++        if (package.enabled && !package.settings.empty())
++        {
++          ImGui::Indent();
++          for (ModSetting& setting : package.settings)
++          {
++            const std::string widget_id =
++                "##modset_" + package.directory + "_" + setting.key;
++            ImGui::TextUnformatted(setting.label.c_str());
++            if (ImGui::BeginCombo(widget_id.c_str(), setting.value.c_str()))
++            {
++              for (const std::string& choice : setting.choices)
++              {
++                const bool selected = choice == setting.value;
++                if (ImGui::Selectable(choice.c_str(), selected) && !selected)
++                {
++                  const std::string previous = setting.value;
++                  setting.value = choice;
++                  SetModSetting(config, ModSettingName(package, setting), choice);
++                  std::string error;
++                  if (!moderngekko::frontend::SaveConfig(user_directory, config, &error))
++                  {
++                    setting.value = previous;
++                    SetModSetting(config, ModSettingName(package, setting), previous);
++                    std::lock_guard lock(dialog.mutex);
++                    dialog.error = std::move(error);
++                  }
++                }
++                if (selected)
++                  ImGui::SetItemDefaultFocus();
++              }
++              ImGui::EndCombo();
++            }
++          }
++          ImGui::Unindent();
++        }
+       }
+       ImGui::TextDisabled("Each enabled mod drops its 16 KB code region to the fallback JIT.");
+     }

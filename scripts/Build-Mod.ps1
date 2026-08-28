@@ -41,6 +41,9 @@ param(
     [Parameter(HelpMessage = 'DolRecomp symbol header to force-include, from Build-Symbols.ps1. Lets the mod use names instead of raw addresses.')]
     [string] $SymbolHeader = '',
 
+    [Parameter(HelpMessage = 'Override the launcher-visible settings. Semicolon-separated key|label|choices|default entries.')]
+    [string] $ModSettings = '',
+
     [string] $Generator = 'Ninja',
 
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo')]
@@ -78,6 +81,7 @@ $cfg = @(
 if (-not [string]::IsNullOrWhiteSpace($ModId))          { $cfg += "-DMOD_ID=$ModId" }
 if (-not [string]::IsNullOrWhiteSpace($ModDisplayName)) { $cfg += "-DMOD_DISPLAY_NAME=$ModDisplayName" }
 if (-not [string]::IsNullOrWhiteSpace($ModVersion))     { $cfg += "-DMOD_VERSION=$ModVersion" }
+if (-not [string]::IsNullOrWhiteSpace($ModSettings)) { $cfg += "-DMOD_SETTINGS=$ModSettings" }
 if (-not [string]::IsNullOrWhiteSpace($SymbolHeader)) {
     if (-not (Test-Path $SymbolHeader)) { throw "Symbol header not found: $SymbolHeader" }
     $cfg += "-DMOD_SYMBOL_HEADER=$((Resolve-Path -LiteralPath $SymbolHeader).Path)"
@@ -130,6 +134,20 @@ $manifest = @(
 )
 if (-not [string]::IsNullOrWhiteSpace($manifestName))    { $manifest += "name=$manifestName" }
 if (-not [string]::IsNullOrWhiteSpace($manifestVersion)) { $manifest += "version=$manifestVersion" }
+
+# Settings the launcher will render. Semicolon-separated in the cache because
+# CMake lists are semicolon-separated; one "setting=" line each in mod.ini.
+$manifestSettings = Get-CacheValue 'MOD_SETTINGS'
+if (-not [string]::IsNullOrWhiteSpace($manifestSettings)) {
+    foreach ($entry in $manifestSettings -split ';') {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if (($trimmed -split '\|').Count -lt 4) {
+            throw "MOD_SETTINGS entry '$trimmed' needs four |-separated fields: key|label|choices|default"
+        }
+        $manifest += "setting=$trimmed"
+    }
+}
 # WriteAllLines with an explicit no-BOM encoding: Set-Content -Encoding UTF8
 # emits a byte order mark on PowerShell 5.1, and a BOM on the first line
 # would only be harmless for as long as that line stays a comment.

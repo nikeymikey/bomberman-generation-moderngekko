@@ -110,6 +110,15 @@ $patches = @(
         # needing the cache cleared here.
         ClearsModuleCache = $false
         Why     = 'pass a linker MAP through to DolRecomp so it emits <stem>_symbols.h for mods'
+    },
+    @{
+        Name    = 'moderngekko-mod-settings'
+        File    = 'moderngekko-mod-settings.patch'
+        Repo    = 'lib\\ModernGekko'
+        Marker  = @{ Path = 'tools\\frontend_config.hpp'; Pattern = 'mod_settings' }
+        # Frontend, launcher and runner only; the generated module is untouched.
+        ClearsModuleCache = $false
+        Why     = 'per-mod settings: declared in mod.ini, chosen in the launcher, stored in config.ini, delivered as environment variables'
     }
 )
 
